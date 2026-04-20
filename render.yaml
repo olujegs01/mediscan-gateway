@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: mediscan-gateway-backend
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: SECRET_KEY
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_PHONE_FROM
+        sync: false
+      - key: MD_PHONE_NUMBER
+        sync: false
+      - key: SLACK_WEBHOOK_URL
+        sync: false
+      # Hardware sensor hosts (leave blank in cloud, set for on-prem)
+      - key: MMWAVE_HOST
+        value: ""
+      - key: THERMAL_HOST
+        value: ""
+      - key: LIDAR_HOST
+        value: ""
+      - key: SPECTRAL_HOST
+        value: ""
+    healthCheckPath: /health

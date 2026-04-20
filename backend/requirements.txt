@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+pydantic
+anthropic
+numpy
+python-multipart
+PyJWT
+bcrypt
+twilio
+httpx

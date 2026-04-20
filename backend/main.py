@@ -1,0 +1,238 @@
+import asyncio
+import json
+from datetime import datetime
+from typing import List
+
+from fastapi import FastAPI, Depends, Query, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+import jwt as pyjwt
+
+from models import PatientScanRequest
+from hardware_sensors import run_full_scan
+from biometric import identify_patient, pull_ehr, verify_insurance
+from triage import run_ai_triage
+from notifications import generate_wristband, send_phone_push, send_family_alert, stage_care_orders
+from alerts import notify_physician
+from auth import LoginRequest, TokenResponse, verify_token, require_role, login, SECRET_KEY, ALGORITHM
+
+app = FastAPI(title="MediScan Gateway API", version="2.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+er_queue: List[dict] = []
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+@app.post("/auth/login", response_model=TokenResponse)
+def auth_login(data: LoginRequest):
+    return login(data)
+
+
+@app.get("/auth/me")
+def auth_me(token: dict = Depends(verify_token)):
+    return {"username": token["sub"], "role": token["role"]}
+
+
+# ── Queue (protected) ─────────────────────────────────────────────────────────
+
+@app.get("/queue")
+def get_queue(_: dict = Depends(verify_token)):
+    return sorted(er_queue, key=lambda p: p["esi_level"])
+
+
+@app.delete("/queue/{patient_id}")
+def discharge_patient(patient_id: str, _: dict = Depends(require_role("admin", "nurse", "physician"))):
+    global er_queue
+    er_queue = [p for p in er_queue if p["patient_id"] != patient_id]
+    return {"discharged": patient_id}
+
+
+@app.delete("/queue")
+def clear_queue(_: dict = Depends(require_role("admin"))):
+    er_queue.clear()
+    return {"cleared": True}
+
+
+# ── Health (public) ───────────────────────────────────────────────────────────
+
+@app.get("/")
+@app.get("/health")
+def health():
+    return {"status": "ok", "version": "2.0", "message": "MediScan Gateway API"}
+
+
+# ── Scan Stream ───────────────────────────────────────────────────────────────
+
+def verify_query_token(token: str = Query(...)) -> dict:
+    """Accepts token as query param for SSE (EventSource can't set headers)."""
+    try:
+        return pyjwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except pyjwt.ExpiredSignatureError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
+    except pyjwt.InvalidTokenError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+
+@app.get("/scan/stream")
+async def scan_stream(
+    name: str,
+    age: int,
+    chief_complaint: str,
+    wristband_id: str = None,
+    token: dict = Depends(verify_query_token),
+):
+    """SSE endpoint — streams zone-by-zone progress as patient walks through the portal."""
+
+    async def event_generator():
+        def sse(event_type: str, payload: dict) -> str:
+            return f"data: {json.dumps({'event': event_type, **payload})}\n\n"
+
+        # Zone 1 — Sensors
+        yield sse("zone1_start", {"zone": 1, "message": "Patient entering sensor portal..."})
+        await asyncio.sleep(0.8)
+
+        sensors = run_full_scan(age, chief_complaint)
+        yield sse("zone1_complete", {
+            "zone": 1,
+            "message": "Zone 1 complete — all sensors fired",
+            "data": sensors.dict(),
+        })
+        await asyncio.sleep(0.4)
+
+        # Zone 2 — Biometric + EHR + Insurance
+        yield sse("zone2_start", {"zone": 2, "message": "Running biometric identification..."})
+        await asyncio.sleep(0.5)
+
+        biometric = identify_patient(name, wristband_id)
+        patient_id = biometric.patient_id
+        yield sse("zone2_biometric", {
+            "zone": 2,
+            "message": f"Face match: {biometric.face_match_confidence * 100:.1f}% confidence",
+            "data": biometric.dict(),
+        })
+        await asyncio.sleep(0.3)
+
+        ehr = pull_ehr(patient_id, name, age)
+        yield sse("zone2_ehr", {
+            "zone": 2,
+            "message": "EHR pulled from Epic/Cerner",
+            "data": ehr.dict(),
+        })
+        await asyncio.sleep(0.3)
+
+        insurance = verify_insurance(patient_id)
+        yield sse("zone2_insurance", {
+            "zone": 2,
+            "message": f"Insurance verified — {insurance.provider} — Co-pay: ${insurance.copay:.0f}",
+            "data": insurance.dict(),
+        })
+        await asyncio.sleep(0.4)
+
+        # Zone 3 — AI Triage
+        yield sse("zone3_start", {"zone": 3, "message": "AI diagnostic engine running sensor fusion..."})
+        await asyncio.sleep(0.2)
+        yield sse("zone3_llm", {"zone": 3, "message": "Claude triage engine analyzing clinical data..."})
+
+        triage_raw = run_ai_triage(
+            patient_id=patient_id,
+            name=biometric.name or name,
+            age=biometric.age if biometric.age > 0 else age,
+            chief_complaint=chief_complaint,
+            sensors=sensors,
+            ehr=ehr,
+        )
+
+        esi = triage_raw["esi_level"]
+        yield sse("zone3_complete", {
+            "zone": 3,
+            "message": f"ESI {esi} assigned — {triage_raw['priority_label']}",
+            "data": triage_raw,
+        })
+        await asyncio.sleep(0.3)
+
+        # Zone 3b — MD Alert (ESI 1-3, runs async so it doesn't block routing)
+        alert_result = notify_physician(
+            patient_name=biometric.name or name,
+            age=biometric.age if biometric.age > 0 else age,
+            esi_level=esi,
+            chief_complaint=chief_complaint,
+            risk_flags=triage_raw.get("risk_flags", []),
+            room=triage_raw["room_assignment"],
+            md_alert_message=triage_raw.get("md_alert_message", ""),
+        )
+        if alert_result["triggered"]:
+            yield sse("md_alert", {
+                "zone": 3,
+                "message": "On-call physician notified via SMS/Slack",
+                "data": alert_result,
+            })
+
+        # Zone 4 — Routing
+        yield sse("zone4_routing", {
+            "zone": 4,
+            "message": f"Routing to {triage_raw['routing_destination']} — {triage_raw['room_assignment']}",
+            "data": {
+                "esi_level": esi,
+                "destination": triage_raw["routing_destination"],
+                "room": triage_raw["room_assignment"],
+            },
+        })
+        await asyncio.sleep(0.3)
+
+        # Zone 5 — Patient deliverables
+        wristband = generate_wristband(patient_id, triage_raw["room_assignment"])
+        push = send_phone_push(biometric.name or name, esi, triage_raw["room_assignment"], triage_raw["wait_time_minutes"])
+        family = send_family_alert(biometric.name or name, esi, triage_raw["room_assignment"])
+        orders = stage_care_orders(triage_raw["care_pre_staged"], patient_id, triage_raw["room_assignment"])
+
+        yield sse("zone5_complete", {
+            "zone": 5,
+            "message": "Zone 5 complete — patient fully processed",
+            "data": {
+                "wristband": wristband,
+                "phone_push": push,
+                "family_alert": family,
+                "care_orders": orders,
+            },
+        })
+
+        result = {
+            "patient_id": patient_id,
+            "name": biometric.name or name,
+            "age": biometric.age if biometric.age > 0 else age,
+            "chief_complaint": chief_complaint,
+            "esi_level": esi,
+            "priority": triage_raw["priority_label"],
+            "risk_flags": triage_raw["risk_flags"],
+            "ai_summary": triage_raw["ai_summary"],
+            "routing_destination": triage_raw["routing_destination"],
+            "room_assignment": triage_raw["room_assignment"],
+            "wristband_code": wristband["nfc_id"],
+            "wait_time_estimate": triage_raw["wait_time_minutes"],
+            "care_pre_staged": triage_raw["care_pre_staged"],
+            "insurance": insurance.dict(),
+            "timestamp": datetime.utcnow().isoformat(),
+            "sensor_data": sensors.dict(),
+            "ehr_summary": {
+                "history": ehr.history,
+                "medications": ehr.current_medications,
+                "allergies": ehr.allergies,
+            },
+        }
+
+        er_queue.append(result)
+
+        yield sse("scan_complete", {
+            "zone": 0,
+            "message": "Scan complete — patient checked in",
+            "data": result,
+        })
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
