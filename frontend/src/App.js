@@ -182,9 +182,21 @@ function LiveLog({ logs }) {
   );
 }
 
+const COMPLAINT_CATEGORIES = {
+  "Cardiac": ["chest pain", "palpitations", "shortness of breath", "syncope"],
+  "Respiratory": ["difficulty breathing", "wheezing", "coughing blood", "respiratory distress"],
+  "Neurological": ["severe headache", "dizziness", "stroke symptoms", "seizure", "altered consciousness"],
+  "GI / Abdominal": ["abdominal pain", "nausea & vomiting", "rectal bleeding", "severe diarrhea"],
+  "Trauma / MSK": ["fall injury", "fracture", "back pain", "limb swelling", "wound / laceration"],
+  "Infection / Systemic": ["fever & chills", "sepsis symptoms", "rash", "swollen lymph nodes"],
+  "Psych / Other": ["anxiety / panic", "suicidal ideation", "mental health crisis", "allergic reaction", "eye pain", "urinary symptoms"],
+};
+
 export default function App() {
   const { user, logout } = useAuth();
-  const [form, setForm] = useState({ name: "", age: "", chief_complaint: "" });
+  const [form, setForm] = useState({ name: "", age: "" });
+  const [selectedComplaints, setSelectedComplaints] = useState([]);
+  const [customComplaint, setCustomComplaint] = useState("");
   const [scanning, setScanning] = useState(false);
   const [zoneStatus, setZoneStatus] = useState({ 1: "idle", 2: "idle", 3: "idle", 4: "idle", 5: "idle" });
   const [sensorData, setSensorData] = useState(null);
@@ -208,6 +220,22 @@ export default function App() {
     setZoneStatus((prev) => ({ ...prev, [num]: status }));
   };
 
+  const toggleComplaint = (c) => {
+    setSelectedComplaints(prev =>
+      prev.includes(c) ? prev.filter(x => x !== c) : [...prev, c]
+    );
+  };
+
+  const addCustomComplaint = () => {
+    const val = customComplaint.trim();
+    if (val && !selectedComplaints.includes(val)) {
+      setSelectedComplaints(prev => [...prev, val]);
+    }
+    setCustomComplaint("");
+  };
+
+  const removeComplaint = (c) => setSelectedComplaints(prev => prev.filter(x => x !== c));
+
   const resetScan = () => {
     setZoneStatus({ 1: "idle", 2: "idle", 3: "idle", 4: "idle", 5: "idle" });
     setSensorData(null);
@@ -219,6 +247,8 @@ export default function App() {
     setZone5Data(null);
     setScanComplete(false);
     setLogs([]);
+    setSelectedComplaints([]);
+    setCustomComplaint("");
   };
 
   const authHeaders = () => ({
@@ -247,19 +277,22 @@ export default function App() {
   }, [fetchQueue]);
 
   const startScan = () => {
-    if (!form.name || !form.age || !form.chief_complaint) {
-      alert("Please fill in all fields before scanning.");
+    const allComplaints = selectedComplaints.join(", ");
+    if (!form.name || !form.age || !allComplaints) {
+      alert("Please enter name, age, and at least one complaint.");
       return;
     }
 
+    const savedComplaints = [...selectedComplaints];
     resetScan();
+    setSelectedComplaints(savedComplaints);
     setScanning(true);
     setActiveTab("scanner");
 
     const params = new URLSearchParams({
       name: form.name,
       age: form.age,
-      chief_complaint: form.chief_complaint,
+      chief_complaint: allComplaints,
       token: user?.token,
     });
 
@@ -386,28 +419,58 @@ export default function App() {
                     disabled={scanning}
                   />
                 </div>
-                <div className="form-group">
-                  <label>Chief Complaint</label>
-                  <input
-                    placeholder="e.g. chest pain, difficulty breathing, fall..."
-                    value={form.chief_complaint}
-                    onChange={e => setForm({ ...form, chief_complaint: e.target.value })}
-                    disabled={scanning}
-                  />
-                </div>
+                {/* Selected complaints display */}
+                {selectedComplaints.length > 0 && (
+                  <div className="selected-complaints">
+                    <label>Selected ({selectedComplaints.length})</label>
+                    <div className="selected-chips">
+                      {selectedComplaints.map(c => (
+                        <span key={c} className="selected-chip">
+                          {c}
+                          {!scanning && (
+                            <button className="chip-remove" onClick={() => removeComplaint(c)}>×</button>
+                          )}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
-                <div className="quick-complaints">
-                  {["chest pain", "difficulty breathing", "fever & chills", "fall injury", "severe headache", "abdominal pain"].map(c => (
-                    <button
-                      key={c}
-                      className="quick-btn"
-                      onClick={() => setForm(f => ({ ...f, chief_complaint: c }))}
-                      disabled={scanning}
-                    >
-                      {c}
-                    </button>
-                  ))}
-                </div>
+                {/* Category complaint picker */}
+                {!scanning && (
+                  <div className="complaint-picker">
+                    <label>Chief Complaints & Diagnoses</label>
+                    {Object.entries(COMPLAINT_CATEGORIES).map(([category, items]) => (
+                      <div key={category} className="complaint-category">
+                        <div className="complaint-category-label">{category}</div>
+                        <div className="complaint-chips">
+                          {items.map(c => (
+                            <button
+                              key={c}
+                              className={`complaint-chip ${selectedComplaints.includes(c) ? "active" : ""}`}
+                              onClick={() => toggleComplaint(c)}
+                            >
+                              {selectedComplaints.includes(c) && <span className="chip-check">✓ </span>}
+                              {c}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+
+                    {/* Custom complaint input */}
+                    <div className="custom-complaint">
+                      <input
+                        placeholder="Add custom complaint or diagnosis..."
+                        value={customComplaint}
+                        onChange={e => setCustomComplaint(e.target.value)}
+                        onKeyDown={e => e.key === "Enter" && addCustomComplaint()}
+                      />
+                      <button className="add-custom-btn" onClick={addCustomComplaint}>+ Add</button>
+                    </div>
+                  </div>
+                )}
+
 
                 <button
                   className={`scan-btn ${scanning ? "scanning" : ""}`}
