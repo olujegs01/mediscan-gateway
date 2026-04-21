@@ -244,7 +244,7 @@ export default function App() {
     fetchQueue();
     const interval = setInterval(fetchQueue, 10000);
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchQueue]);
 
   const startScan = () => {
     if (!form.name || !form.age || !form.chief_complaint) {
