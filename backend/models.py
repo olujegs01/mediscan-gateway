@@ -4,20 +4,16 @@ from datetime import datetime
 
 
 class SensorReadings(BaseModel):
-    # mmWave radar
     heart_rate: int
     respiratory_rate: int
     gait_speed: float
-    gait_symmetry: float  # 0-1 score
-    # Thermal IR
+    gait_symmetry: float
     skin_temp: float
     fever_flag: bool
     inflammation_zones: List[str]
-    # LiDAR depth
-    posture_score: float  # 0-100
+    posture_score: float
     limb_asymmetry: Optional[str]
     injury_indicators: List[str]
-    # Spectral X-ray
     bone_density_flag: bool
     dense_tissue_alerts: List[str]
 
@@ -53,6 +49,19 @@ class PatientScanRequest(BaseModel):
     wristband_id: Optional[str] = None
 
 
+class ClinicalScores(BaseModel):
+    qsofa_score: int              # 0-3 (>=2 = high sepsis risk)
+    sirs_criteria_met: int        # 0-4
+    sepsis_probability: str       # low / moderate / high / critical
+    admission_probability: int    # 0-100 %
+    lwbs_risk: str                # low / moderate / high
+    deterioration_risk: str       # stable / watch / high
+    vertical_flow_eligible: bool  # can be assessed standing/seated
+    fast_track_eligible: bool     # ESI 3 candidates for fast track
+    behavioral_health_flag: bool  # mental health / psych crisis
+    sepsis_bundle_triggered: bool
+
+
 class TriageResult(BaseModel):
     patient_id: str
     name: str
@@ -64,7 +73,8 @@ class TriageResult(BaseModel):
     routing_destination: str
     room_assignment: Optional[str]
     wristband_code: str
-    wait_time_estimate: int  # minutes
+    wait_time_estimate: int
     care_pre_staged: List[str]
     timestamp: str
     sensor_data: Optional[SensorReadings] = None
+    clinical_scores: Optional[ClinicalScores] = None

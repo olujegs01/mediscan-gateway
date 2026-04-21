@@ -1,3 +1,235 @@
+/* ===== Sepsis / BH Alert Banners ===== */
+.sepsis-alert {
+  background: #7f1d1d;
+  color: #fca5a5;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 10px;
+  letter-spacing: 0.3px;
+}
+
+.bh-alert {
+  background: #3b0764;
+  color: #e9d5ff;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.card-sepsis-banner {
+  background: #7f1d1d;
+  color: #fca5a5;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 12px;
+  margin: -14px -14px 10px;
+  border-radius: 8px 8px 0 0;
+}
+
+.card-bh-banner {
+  background: #3b0764;
+  color: #e9d5ff;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 12px;
+  margin: -14px -14px 10px;
+  border-radius: 8px 8px 0 0;
+}
+
+/* ===== Clinical Scores Row ===== */
+.clinical-scores {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.score-pill {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 11px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.score-pill.eligible {
+  background: #14532d;
+  border-color: #22c55e;
+  color: #86efac;
+  font-weight: 600;
+}
+
+.score-label { color: #64748b; }
+.score-val { font-weight: 600; }
+
+/* ===== Differentials + Time-Sensitive ===== */
+.differentials {
+  font-size: 12px;
+  color: #94a3b8;
+  margin-bottom: 6px;
+  line-height: 1.5;
+}
+
+.diff-label { color: #64748b; font-weight: 600; }
+
+.time-sensitive {
+  font-size: 12px;
+  color: #fbbf24;
+  background: #1c1408;
+  border: 1px solid #92400e;
+  border-radius: 6px;
+  padding: 5px 10px;
+  margin-bottom: 8px;
+}
+
+/* ===== Queue Intel Badges ===== */
+.queue-intel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 8px;
+}
+
+.intel-badge {
+  font-size: 11px;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  padding: 2px 7px;
+  color: #94a3b8;
+}
+
+.intel-badge.warn { border-color: #ca8a04; color: #fbbf24; }
+.intel-badge.ok { border-color: #22c55e; color: #86efac; }
+
+.queue-ddx { font-size: 11px; color: #64748b; margin-bottom: 6px; }
+
+/* ===== Analytics Dashboard ===== */
+.analytics-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.analytics-loading {
+  color: #64748b;
+  padding: 40px;
+  text-align: center;
+}
+
+/* Alert strip */
+.alert-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.alert-item {
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.alert-critical { background: #7f1d1d; color: #fca5a5; border-left: 4px solid #dc2626; }
+.alert-warning { background: #1c1408; color: #fbbf24; border-left: 4px solid #ca8a04; }
+.alert-info { background: #1e3a5f; color: #93c5fd; border-left: 4px solid #2563eb; }
+
+/* Sections */
+.analytics-section {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 14px;
+  padding: 20px;
+}
+
+.section-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 16px;
+}
+
+/* Metrics grid */
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.metric-card {
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  padding: 14px;
+}
+
+.metric-val {
+  font-size: 28px;
+  font-weight: 700;
+  color: #e2e8f0;
+  line-height: 1;
+  margin-bottom: 4px;
+}
+
+.metric-sub { font-size: 16px; color: #64748b; }
+.metric-label { font-size: 12px; color: #64748b; margin-bottom: 6px; }
+.metric-note { font-size: 10px; color: #334155; }
+
+.capacity-bar {
+  height: 4px;
+  background: #334155;
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+
+.capacity-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.5s ease;
+}
+
+/* ESI breakdown bars */
+.esi-breakdown { display: flex; flex-direction: column; gap: 8px; }
+
+.esi-bar-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.esi-bar-label { font-size: 12px; font-weight: 600; width: 48px; flex-shrink: 0; }
+.esi-bar-track { flex: 1; height: 8px; background: #0f172a; border-radius: 4px; overflow: hidden; }
+.esi-bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s ease; min-width: 2px; }
+.esi-bar-count { font-size: 13px; font-weight: 700; width: 24px; text-align: right; flex-shrink: 0; }
+
+/* Comparison table */
+.comparison-table { display: flex; flex-direction: column; gap: 0; }
+
+.comp-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  padding: 10px 0;
+  border-bottom: 1px solid #1e293b;
+  align-items: center;
+  gap: 10px;
+}
+
+.comp-row:last-child { border-bottom: none; }
+.comp-metric { font-size: 13px; color: #cbd5e1; font-weight: 500; }
+.comp-national { font-size: 12px; color: #64748b; }
+.comp-mediscan { font-size: 13px; font-weight: 700; text-align: right; }
+
 /* ===== Complaint Picker ===== */
 .complaint-picker {
   margin-bottom: 16px;

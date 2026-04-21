@@ -103,12 +103,54 @@ function SensorCard({ data }) {
 function TriageCard({ data }) {
   if (!data) return null;
   const cfg = ESI_CONFIG[data.esi_level] || ESI_CONFIG[5];
+  const sepsisCritical = ["high", "critical"].includes(data.sepsis_probability);
   return (
     <div className="triage-card" style={{ borderColor: cfg.color, background: cfg.bg }}>
       <div className="esi-badge" style={{ background: cfg.color }}>
         ESI {data.esi_level} — {cfg.label}
       </div>
+
+      {/* Sepsis alert banner */}
+      {sepsisCritical && (
+        <div className="sepsis-alert">
+          🧬 SEPSIS {data.sepsis_probability?.toUpperCase()} — qSOFA {data.qsofa_score} · SIRS {data.sirs_criteria_met}/4
+          {data.sepsis_bundle_triggered && " · BUNDLE TRIGGERED"}
+        </div>
+      )}
+
+      {/* Behavioral health banner */}
+      {data.behavioral_health_flag && (
+        <div className="bh-alert">🧠 BEHAVIORAL HEALTH — Crisis routing active</div>
+      )}
+
       <div className="triage-summary">{data.ai_summary || data.primary_concern}</div>
+
+      {/* Clinical scores row */}
+      <div className="clinical-scores">
+        <div className="score-pill">
+          <span className="score-label">Admit Risk</span>
+          <span className="score-val" style={{ color: data.admission_probability >= 70 ? "#ef4444" : data.admission_probability >= 40 ? "#f97316" : "#22c55e" }}>
+            {data.admission_probability}%
+          </span>
+        </div>
+        <div className="score-pill">
+          <span className="score-label">LWBS Risk</span>
+          <span className="score-val" style={{ color: data.lwbs_risk === "high" ? "#ef4444" : data.lwbs_risk === "moderate" ? "#f97316" : "#22c55e" }}>
+            {data.lwbs_risk}
+          </span>
+        </div>
+        <div className="score-pill">
+          <span className="score-label">Disposition</span>
+          <span className="score-val">{data.disposition_prediction}</span>
+        </div>
+        {data.vertical_flow_eligible && (
+          <div className="score-pill eligible">⬆ Vertical Flow</div>
+        )}
+        {data.fast_track_eligible && (
+          <div className="score-pill eligible">⚡ Fast Track</div>
+        )}
+      </div>
+
       {data.risk_flags?.length > 0 && (
         <div className="risk-flags">
           {data.risk_flags.map((f, i) => (
@@ -116,6 +158,20 @@ function TriageCard({ data }) {
           ))}
         </div>
       )}
+
+      {data.differential_diagnoses?.length > 0 && (
+        <div className="differentials">
+          <span className="diff-label">DDx: </span>
+          {data.differential_diagnoses.join(" · ")}
+        </div>
+      )}
+
+      {data.time_sensitive_interventions?.length > 0 && (
+        <div className="time-sensitive">
+          ⏱ &lt;30min: {data.time_sensitive_interventions.join(" · ")}
+        </div>
+      )}
+
       <div className="routing-dest">
         📍 {data.routing_destination} → <b>{data.room_assignment}</b>
       </div>
@@ -125,8 +181,14 @@ function TriageCard({ data }) {
 
 function PatientQueueCard({ patient, onDischarge }) {
   const cfg = ESI_CONFIG[patient.esi_level] || ESI_CONFIG[5];
+  const td = patient.triage_detail || {};
+  const sepsisCritical = ["high", "critical"].includes(td.sepsis_probability);
+
   return (
     <div className="queue-card" style={{ borderLeftColor: cfg.color }}>
+      {sepsisCritical && <div className="card-sepsis-banner">🧬 SEPSIS {td.sepsis_probability?.toUpperCase()} · qSOFA {td.qsofa_score}</div>}
+      {td.behavioral_health_flag && <div className="card-bh-banner">🧠 BEHAVIORAL HEALTH</div>}
+
       <div className="queue-top">
         <div>
           <div className="queue-name">{patient.name}</div>
@@ -136,29 +198,201 @@ function PatientQueueCard({ patient, onDischarge }) {
           {cfg.icon} ESI {patient.esi_level}
         </div>
       </div>
+
       <div className="queue-details">
         <span>🏥 {patient.room_assignment}</span>
         <span>⏱ ~{patient.wait_time_estimate} min</span>
         <span>🆔 {patient.wristband_code}</span>
       </div>
+
+      {/* Clinical intelligence badges */}
+      <div className="queue-intel">
+        {td.admission_probability != null && (
+          <span className="intel-badge" style={{ color: td.admission_probability >= 70 ? "#ef4444" : "#94a3b8" }}>
+            Admit {td.admission_probability}%
+          </span>
+        )}
+        {td.lwbs_risk === "high" && <span className="intel-badge warn">⚠ LWBS Risk</span>}
+        {td.vertical_flow_eligible && <span className="intel-badge ok">⬆ Vertical</span>}
+        {td.fast_track_eligible && <span className="intel-badge ok">⚡ Fast Track</span>}
+        {td.disposition_prediction && <span className="intel-badge">{td.disposition_prediction}</span>}
+      </div>
+
       {patient.risk_flags?.length > 0 && (
         <div className="queue-flags">
           {patient.risk_flags.map((f, i) => (
-            <span key={i} className="queue-flag" style={{ background: cfg.bg, color: cfg.color }}>
-              {f}
-            </span>
+            <span key={i} className="queue-flag" style={{ background: cfg.bg, color: cfg.color }}>{f}</span>
           ))}
         </div>
       )}
+
+      {td.differential_diagnoses?.length > 0 && (
+        <div className="queue-ddx">DDx: {td.differential_diagnoses.join(" · ")}</div>
+      )}
+
       {patient.care_pre_staged?.length > 0 && (
         <div className="queue-orders">
           📋 {patient.care_pre_staged.slice(0, 3).join(" · ")}
           {patient.care_pre_staged.length > 3 && ` +${patient.care_pre_staged.length - 3} more`}
         </div>
       )}
+
       <button className="discharge-btn" onClick={() => onDischarge(patient.patient_id)}>
         Discharge
       </button>
+    </div>
+  );
+}
+
+function AnalyticsDashboard({ user }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const fetchAnalytics = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/analytics`, {
+        headers: { Authorization: `Bearer ${user?.token}` },
+      });
+      const json = await res.json();
+      setData(json);
+    } catch (e) {
+      console.error("Analytics error:", e);
+    } finally {
+      setLoading(false);
+    }
+  }, [user?.token]);
+
+  useEffect(() => {
+    fetchAnalytics();
+    const interval = setInterval(fetchAnalytics, 15000);
+    return () => clearInterval(interval);
+  }, [fetchAnalytics]);
+
+  if (loading) return <div className="analytics-loading">Loading analytics...</div>;
+  if (!data) return null;
+
+  const cap = data.capacity;
+  const q = data.queue;
+  const perf = data.performance;
+
+  const capColor = cap.status === "critical" ? "#dc2626" : cap.status === "high" ? "#ea580c" : cap.status === "moderate" ? "#ca8a04" : "#22c55e";
+
+  return (
+    <div className="analytics-layout">
+      {/* Live Alerts */}
+      {data.alerts?.length > 0 && (
+        <div className="alert-strip">
+          {data.alerts.map((a, i) => (
+            <div key={i} className={`alert-item alert-${a.level}`}>
+              {a.level === "critical" ? "🚨" : a.level === "warning" ? "⚠️" : "ℹ️"} {a.message}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Capacity Overview */}
+      <div className="analytics-section">
+        <h3 className="section-title">ED Capacity</h3>
+        <div className="metrics-grid">
+          <div className="metric-card">
+            <div className="metric-val" style={{ color: capColor }}>{cap.occupancy_percent}%</div>
+            <div className="metric-label">Occupancy</div>
+            <div className="capacity-bar"><div className="capacity-fill" style={{ width: `${cap.occupancy_percent}%`, background: capColor }} /></div>
+          </div>
+          <div className="metric-card">
+            <div className="metric-val">{cap.occupied_beds}<span className="metric-sub">/{cap.total_beds}</span></div>
+            <div className="metric-label">Beds Occupied</div>
+          </div>
+          <div className="metric-card">
+            <div className="metric-val" style={{ color: cap.boarding_patients > 3 ? "#ea580c" : "#94a3b8" }}>{cap.boarding_patients}</div>
+            <div className="metric-label">Boarding Patients</div>
+          </div>
+          <div className="metric-card">
+            <div className="metric-val" style={{ color: "#22c55e" }}>{perf.door_to_triage_seconds}s</div>
+            <div className="metric-label">Door-to-Triage</div>
+            <div className="metric-note">National avg: 28 min</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Queue Intelligence */}
+      <div className="analytics-section">
+        <h3 className="section-title">Queue Intelligence</h3>
+        <div className="metrics-grid">
+          <div className="metric-card">
+            <div className="metric-val">{q.total_patients}</div>
+            <div className="metric-label">In Queue</div>
+          </div>
+          <div className="metric-card">
+            <div className="metric-val">{q.avg_wait_minutes} min</div>
+            <div className="metric-label">Avg Wait</div>
+            <div className="metric-note">National avg: 162 min</div>
+          </div>
+          <div className="metric-card">
+            <div className="metric-val" style={{ color: q.sepsis_alerts > 0 ? "#dc2626" : "#22c55e" }}>{q.sepsis_alerts}</div>
+            <div className="metric-label">Sepsis Alerts</div>
+          </div>
+          <div className="metric-card">
+            <div className="metric-val" style={{ color: q.behavioral_health > 0 ? "#a78bfa" : "#94a3b8" }}>{q.behavioral_health}</div>
+            <div className="metric-label">Behavioral Health</div>
+          </div>
+          <div className="metric-card">
+            <div className="metric-val" style={{ color: q.admission_likely > 0 ? "#f97316" : "#94a3b8" }}>{q.admission_likely}</div>
+            <div className="metric-label">Likely Admissions</div>
+          </div>
+          <div className="metric-card">
+            <div className="metric-val" style={{ color: q.lwbs_high_risk > 0 ? "#ca8a04" : "#22c55e" }}>{q.lwbs_high_risk}</div>
+            <div className="metric-label">LWBS Risk</div>
+          </div>
+        </div>
+      </div>
+
+      {/* ESI Breakdown */}
+      <div className="analytics-section">
+        <h3 className="section-title">ESI Breakdown</h3>
+        <div className="esi-breakdown">
+          {[1,2,3,4,5].map(esi => {
+            const cfg = ESI_CONFIG[esi];
+            const count = q.esi_breakdown?.[String(esi)] || 0;
+            return (
+              <div key={esi} className="esi-bar-item">
+                <div className="esi-bar-label" style={{ color: cfg.color }}>ESI {esi}</div>
+                <div className="esi-bar-track">
+                  <div className="esi-bar-fill" style={{ width: count > 0 ? `${Math.min(100, count * 20)}%` : "0%", background: cfg.color }} />
+                </div>
+                <div className="esi-bar-count" style={{ color: cfg.color }}>{count}</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Performance vs National */}
+      <div className="analytics-section">
+        <h3 className="section-title">MediScan vs National Average</h3>
+        <div className="comparison-table">
+          <div className="comp-row">
+            <span className="comp-metric">Door-to-Triage</span>
+            <span className="comp-national">28 min national avg</span>
+            <span className="comp-mediscan" style={{ color: "#22c55e" }}>{perf.door_to_triage_seconds}s ↓97%</span>
+          </div>
+          <div className="comp-row">
+            <span className="comp-metric">LWBS Rate</span>
+            <span className="comp-national">5%+ national avg</span>
+            <span className="comp-mediscan" style={{ color: "#22c55e" }}>{perf.lwbs_rate_today}% today</span>
+          </div>
+          <div className="comp-row">
+            <span className="comp-metric">Avg LOS</span>
+            <span className="comp-national">162 min national avg</span>
+            <span className="comp-mediscan" style={{ color: perf.avg_los_minutes < 162 ? "#22c55e" : "#f97316" }}>{perf.avg_los_minutes} min</span>
+          </div>
+          <div className="comp-row">
+            <span className="comp-metric">Patients Seen Today</span>
+            <span className="comp-national">—</span>
+            <span className="comp-mediscan">{perf.patients_seen_today}</span>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -390,6 +624,9 @@ export default function App() {
         </button>
         <button className={`tab ${activeTab === "queue" ? "active" : ""}`} onClick={() => setActiveTab("queue")}>
           🏥 ER Queue {queue.length > 0 && <span className="tab-badge">{queue.length}</span>}
+        </button>
+        <button className={`tab ${activeTab === "analytics" ? "active" : ""}`} onClick={() => setActiveTab("analytics")}>
+          📊 Command Dashboard
         </button>
       </div>
 
@@ -629,6 +866,8 @@ export default function App() {
             )}
           </div>
         )}
+
+        {activeTab === "analytics" && <AnalyticsDashboard user={user} />}
       </main>
     </div>
   );
