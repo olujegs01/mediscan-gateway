@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import "./App.css";
 import { useAuth, API_BASE } from "./AuthContext";
 
@@ -225,15 +225,15 @@ export default function App() {
     Authorization: `Bearer ${user?.token}`,
   });
 
-  const fetchQueue = async () => {
+  const fetchQueue = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/queue`, { headers: authHeaders() });
+      const res = await fetch(`${API_BASE}/queue`, { headers: { Authorization: `Bearer ${user?.token}` } });
       const data = await res.json();
       setQueue(data);
     } catch (e) {
       console.error("Queue fetch error:", e);
     }
-  };
+  }, [user?.token]);
 
   const dischargePatient = async (patientId) => {
     await fetch(`${API_BASE}/queue/${patientId}`, { method: "DELETE", headers: authHeaders() });
