@@ -8,3 +8,6 @@ PyJWT
 bcrypt
 twilio
 httpx
+sqlalchemy
+psycopg2-binary
+reportlab

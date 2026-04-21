@@ -1025,3 +1025,37 @@ body {
 
 .empty-icon { font-size: 48px; margin-bottom: 12px; }
 .empty-sub { font-size: 13px; color: #334155; margin-top: 6px; }
+
+/* ===== Shift Report Panel ===== */
+.report-layout {
+  padding: 20px;
+  max-width: 960px;
+  margin: 0 auto;
+}
+
+.report-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.report-header h2 {
+  font-size: 22px;
+  font-weight: 700;
+  color: #e2e8f0;
+  margin: 0;
+}
+
+/* ===== Audit Log inline badge ===== */
+.sms-badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: #134e4a;
+  color: #5eead4;
+  margin-left: 6px;
+}

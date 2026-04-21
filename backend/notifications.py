@@ -1,6 +1,27 @@
+import os
 import uuid
-import random
-import string
+
+try:
+    from twilio.rest import Client as TwilioClient
+    _twilio = TwilioClient(
+        os.getenv("TWILIO_ACCOUNT_SID"),
+        os.getenv("TWILIO_AUTH_TOKEN"),
+    ) if os.getenv("TWILIO_ACCOUNT_SID") else None
+except Exception:
+    _twilio = None
+
+_FROM = os.getenv("TWILIO_PHONE_FROM", "")
+
+
+def _sms(to: str, body: str) -> bool:
+    if not (_twilio and _FROM and to):
+        return False
+    try:
+        _twilio.messages.create(to=to, from_=_FROM, body=body)
+        return True
+    except Exception as e:
+        print(f"Twilio patient SMS error: {e}")
+        return False
 
 
 def generate_wristband(patient_id: str, room: str) -> dict:
@@ -15,8 +36,8 @@ def generate_wristband(patient_id: str, room: str) -> dict:
     }
 
 
-def send_phone_push(name: str, esi: int, room: str, wait_time: int) -> dict:
-    """Zone 5: Push notification to patient's phone via MyChart/hospital app."""
+def send_phone_push(name: str, esi: int, room: str, wait_time: int, phone: str = None) -> dict:
+    """Zone 5: Push notification + Twilio SMS to patient's phone."""
     messages = {
         1: f"URGENT: {name}, you are being taken to {room} immediately. A team is ready for you.",
         2: f"{name}, you have been assigned to {room}. A nurse will see you within 5 minutes.",
@@ -24,10 +45,13 @@ def send_phone_push(name: str, esi: int, room: str, wait_time: int) -> dict:
         4: f"{name}, check-in complete. Wait time estimate: ~{wait_time} min. Room: {room}.",
         5: f"{name}, check-in complete. Please proceed to the self-serve kiosk. Wait: ~{wait_time} min.",
     }
+    text = messages.get(esi, f"{name} — check-in complete. Room: {room}.")
+    sms_sent = _sms(phone, f"MediScan: {text}") if phone else False
     return {
         "sent": True,
+        "sms_sent": sms_sent,
         "channel": "MyChart Push + SMS",
-        "message": messages.get(esi, f"{name} — check-in complete. Room: {room}."),
+        "message": text,
         "wait_time_estimate_min": wait_time,
     }
 

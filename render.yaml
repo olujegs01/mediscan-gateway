@@ -6,6 +6,10 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: mediscan-db
+          property: connectionString
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: SECRET_KEY
@@ -20,7 +24,6 @@ services:
         sync: false
       - key: SLACK_WEBHOOK_URL
         sync: false
-      # Hardware sensor hosts (leave blank in cloud, set for on-prem)
       - key: MMWAVE_HOST
         value: ""
       - key: THERMAL_HOST
@@ -30,3 +33,7 @@ services:
       - key: SPECTRAL_HOST
         value: ""
     healthCheckPath: /health
+
+databases:
+  - name: mediscan-db
+    plan: free

@@ -397,6 +397,183 @@ function AnalyticsDashboard({ user }) {
   );
 }
 
+function AuditLogPanel({ user }) {
+  const [logs, setAuditLogs] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const fetchAudit = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/audit?limit=200`, {
+        headers: { Authorization: `Bearer ${user?.token}` },
+      });
+      const data = await res.json();
+      setAuditLogs(Array.isArray(data) ? data : []);
+    } catch (e) {
+      console.error("Audit fetch error:", e);
+    } finally {
+      setLoading(false);
+    }
+  }, [user?.token]);
+
+  useEffect(() => { fetchAudit(); }, [fetchAudit]);
+
+  const ACTION_COLOR = {
+    login: "#60a5fa", scan: "#34d399", discharge: "#f87171",
+    view_queue: "#94a3b8", view_analytics: "#a78bfa",
+    generate_report: "#fbbf24", view_audit: "#94a3b8",
+  };
+
+  if (loading) return <div className="analytics-loading">Loading audit log...</div>;
+
+  return (
+    <div className="report-layout">
+      <div className="report-header">
+        <div>
+          <h2>HIPAA Audit Log</h2>
+          <p style={{ color: "#94a3b8", marginTop: 4 }}>All access to patient data — last 200 events</p>
+        </div>
+        <button className="refresh-btn" onClick={fetchAudit}>↻ Refresh</button>
+      </div>
+      <div className="card" style={{ marginTop: 0, overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <thead>
+            <tr style={{ background: "#1e293b", color: "#94a3b8" }}>
+              {["Timestamp", "User", "Role", "Action", "Patient ID", "IP", "Status"].map(h => (
+                <th key={h} style={{ padding: "8px 10px", textAlign: "left", fontWeight: 500, whiteSpace: "nowrap" }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {logs.map((r, i) => (
+              <tr key={r.id} style={{ background: i % 2 === 0 ? "#1a2332" : "#151e2d", color: "#cbd5e1" }}>
+                <td style={{ padding: "6px 10px", whiteSpace: "nowrap" }}>{new Date(r.timestamp).toLocaleString()}</td>
+                <td style={{ padding: "6px 10px" }}>{r.username}</td>
+                <td style={{ padding: "6px 10px", color: "#94a3b8" }}>{r.role}</td>
+                <td style={{ padding: "6px 10px" }}>
+                  <span style={{ color: ACTION_COLOR[r.action] || "#e2e8f0", fontWeight: 600 }}>{r.action}</span>
+                </td>
+                <td style={{ padding: "6px 10px", color: "#64748b", fontFamily: "monospace", fontSize: 11 }}>
+                  {r.patient_id ? r.patient_id.slice(0, 12) + "…" : "—"}
+                </td>
+                <td style={{ padding: "6px 10px", color: "#475569" }}>{r.ip_address || "—"}</td>
+                <td style={{ padding: "6px 10px" }}>
+                  <span style={{ color: r.success ? "#4ade80" : "#f87171" }}>{r.success ? "✓" : "✗"}</span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {logs.length === 0 && (
+          <div style={{ textAlign: "center", padding: "40px", color: "#475569" }}>No audit records yet</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ShiftReportPanel({ user }) {
+  const [generating, setGenerating] = useState(false);
+  const [reports, setReports] = useState([]);
+  const [msg, setMsg] = useState("");
+
+  const loadReports = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/report`, {
+        headers: { Authorization: `Bearer ${user?.token}` },
+      });
+      const data = await res.json();
+      setReports(Array.isArray(data) ? data : []);
+    } catch (e) {
+      console.error("Report list error:", e);
+    }
+  }, [user?.token]);
+
+  useEffect(() => { loadReports(); }, [loadReports]);
+
+  const handleGenerate = async (format) => {
+    setGenerating(true);
+    setMsg("");
+    try {
+      const res = await fetch(`${API_BASE}/report?format=${format}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${user?.token}` },
+      });
+      if (format === "pdf") {
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `mediscan_shift_report_${new Date().toISOString().slice(0,16).replace("T","_")}.pdf`;
+        a.click();
+        URL.revokeObjectURL(url);
+        setMsg("PDF downloaded.");
+      } else {
+        await res.json();
+        setMsg("Report saved.");
+      }
+      loadReports();
+    } catch (e) {
+      setMsg("Error generating report.");
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  return (
+    <div className="report-layout">
+      <div className="report-header">
+        <div>
+          <h2>Shift Handoff Report</h2>
+          <p style={{ color: "#94a3b8", marginTop: 4 }}>HIPAA-compliant PDF for charge nurse handoff</p>
+        </div>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button className="scan-btn" onClick={() => handleGenerate("pdf")} disabled={generating} style={{ background: "#0d9488" }}>
+            {generating ? "Generating…" : "⬇ Download PDF"}
+          </button>
+          <button className="refresh-btn" onClick={() => handleGenerate("json")} disabled={generating}>
+            Save Report
+          </button>
+        </div>
+      </div>
+      {msg && <div style={{ padding: "8px 12px", background: "#f0fdf4", color: "#15803d", borderRadius: 6, marginBottom: 12 }}>{msg}</div>}
+
+      {reports.length > 0 && (
+        <div className="card" style={{ marginTop: 0 }}>
+          <h3 style={{ marginBottom: 12, color: "#e2e8f0", fontSize: 14, fontWeight: 600 }}>Recent Reports</h3>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ background: "#1e293b", color: "#94a3b8" }}>
+                {["Generated", "By", "Patients", "Avg Wait", "Sepsis", "Admissions"].map(h => (
+                  <th key={h} style={{ padding: "8px 12px", textAlign: "left", fontWeight: 500 }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {reports.map((r, i) => (
+                <tr key={r.id} style={{ background: i % 2 === 0 ? "#1a2332" : "#151e2d", color: "#cbd5e1" }}>
+                  <td style={{ padding: "7px 12px" }}>{r.created_at ? new Date(r.created_at).toLocaleString() : "—"}</td>
+                  <td style={{ padding: "7px 12px" }}>{r.generated_by}</td>
+                  <td style={{ padding: "7px 12px" }}>{r.total_patients}</td>
+                  <td style={{ padding: "7px 12px" }}>{r.avg_wait_minutes?.toFixed(0)} min</td>
+                  <td style={{ padding: "7px 12px", color: r.sepsis_count > 0 ? "#f87171" : "#4ade80" }}>{r.sepsis_count}</td>
+                  <td style={{ padding: "7px 12px" }}>{r.admissions_predicted}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {reports.length === 0 && (
+        <div className="empty-queue">
+          <div className="empty-icon">📋</div>
+          <div>No reports generated yet</div>
+          <div className="empty-sub">Click "Download PDF" to generate your first shift report</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function LiveLog({ logs }) {
   const ref = useRef(null);
   useEffect(() => {
@@ -428,7 +605,7 @@ const COMPLAINT_CATEGORIES = {
 
 export default function App() {
   const { user, logout } = useAuth();
-  const [form, setForm] = useState({ name: "", age: "" });
+  const [form, setForm] = useState({ name: "", age: "", phone: "" });
   const [selectedComplaints, setSelectedComplaints] = useState([]);
   const [customComplaint, setCustomComplaint] = useState("");
   const [scanning, setScanning] = useState(false);
@@ -483,6 +660,7 @@ export default function App() {
     setLogs([]);
     setSelectedComplaints([]);
     setCustomComplaint("");
+    setForm(f => ({ ...f, phone: "" }));
   };
 
   const authHeaders = () => ({
@@ -529,6 +707,7 @@ export default function App() {
       chief_complaint: allComplaints,
       token: user?.token,
     });
+    if (form.phone) params.append("phone", form.phone);
 
     const evtSource = new EventSource(`${API_BASE}/scan/stream?${params}`);
 
@@ -628,6 +807,16 @@ export default function App() {
         <button className={`tab ${activeTab === "analytics" ? "active" : ""}`} onClick={() => setActiveTab("analytics")}>
           📊 Command Dashboard
         </button>
+        {(user?.role === "admin" || user?.role === "nurse" || user?.role === "physician") && (
+          <button className={`tab ${activeTab === "report" ? "active" : ""}`} onClick={() => setActiveTab("report")}>
+            📋 Shift Report
+          </button>
+        )}
+        {user?.role === "admin" && (
+          <button className={`tab ${activeTab === "audit" ? "active" : ""}`} onClick={() => setActiveTab("audit")}>
+            🔒 Audit Log
+          </button>
+        )}
       </div>
 
       <main className="app-main">
@@ -653,6 +842,16 @@ export default function App() {
                     placeholder="e.g. 58"
                     value={form.age}
                     onChange={e => setForm({ ...form, age: e.target.value })}
+                    disabled={scanning}
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Mobile Phone <span style={{color:"#94a3b8",fontWeight:400}}>(optional — SMS updates)</span></label>
+                  <input
+                    type="tel"
+                    placeholder="e.g. +13125551234"
+                    value={form.phone}
+                    onChange={e => setForm({ ...form, phone: e.target.value })}
                     disabled={scanning}
                   />
                 </div>
@@ -868,6 +1067,8 @@ export default function App() {
         )}
 
         {activeTab === "analytics" && <AnalyticsDashboard user={user} />}
+        {activeTab === "report" && <ShiftReportPanel user={user} />}
+        {activeTab === "audit" && <AuditLogPanel user={user} />}
       </main>
     </div>
   );
