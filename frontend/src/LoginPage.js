@@ -126,16 +126,20 @@ function KioskDemo() {
 
 export default function LoginPage() {
   const { login } = useAuth();
-  const [form, setForm] = useState({ username: "", password: "" });
+  const [form, setForm] = useState({ username: "", password: "", totp_code: "" });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [mfaRequired, setMfaRequired] = useState(false);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError("");
     setLoading(true);
     try {
-      await login(form.username, form.password);
+      const result = await login(form.username, form.password, mfaRequired ? form.totp_code : undefined);
+      if (result?.mfa_required && !mfaRequired) {
+        setMfaRequired(true);
+      }
     } catch (err) {
       setError(err.message);
     } finally {
@@ -209,8 +213,28 @@ export default function LoginPage() {
 
             {error && <div className="login-error">{error}</div>}
 
-            <button type="submit" className="scan-btn" disabled={loading}>
-              {loading ? <><span className="btn-spinner" /> Signing in...</> : "Sign In →"}
+            {mfaRequired && (
+            <div className="form-group">
+              <label>Authenticator Code</label>
+              <input
+                type="text"
+                placeholder="6-digit code"
+                value={form.totp_code}
+                onChange={e => setForm(f => ({ ...f, totp_code: e.target.value }))}
+                maxLength={6}
+                autoComplete="one-time-code"
+                autoFocus
+                disabled={loading}
+                style={{ letterSpacing: "0.3em", fontSize: 20, textAlign: "center" }}
+              />
+              <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6 }}>
+                Open your authenticator app and enter the 6-digit code
+              </div>
+            </div>
+          )}
+
+          <button type="submit" className="scan-btn" disabled={loading}>
+              {loading ? <><span className="btn-spinner" /> Signing in...</> : mfaRequired ? "Verify Code →" : "Sign In →"}
             </button>
           </form>
 

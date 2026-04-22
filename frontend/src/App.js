@@ -1,6 +1,9 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import "./App.css";
 import { useAuth, API_BASE } from "./AuthContext";
+import { useWebSocket } from "./hooks/useWebSocket";
+
+const WS_BASE = API_BASE.replace(/^https/, "wss").replace(/^http/, "ws");
 
 const ESI_CONFIG = {
   1: { color: "#dc2626", bg: "#fef2f2", label: "CRITICAL", icon: "🚨", destination: "Trauma Bay" },
@@ -860,6 +863,30 @@ const COMPLAINT_CATEGORIES = {
   "Psych / Other": ["anxiety / panic", "suicidal ideation", "mental health crisis", "allergic reaction", "eye pain", "urinary symptoms"],
 };
 
+const PAGE_TITLES = {
+  scanner:   "Patient Scanner",
+  queue:     "ER Queue",
+  analytics: "Command Dashboard",
+  beds:      "Bed Board",
+  report:    "Shift Report",
+  audit:     "Audit Log",
+};
+
+const NAV_ITEMS = [
+  { id: "scanner",   icon: "📡", label: "Patient Scanner" },
+  { id: "queue",     icon: "🏥", label: "ER Queue",       badge: true },
+  { id: "analytics", icon: "📊", label: "Command",        },
+  { id: "beds",      icon: "🛏", label: "Bed Board",      },
+];
+
+const STAFF_NAV = [
+  { id: "report",  icon: "📋", label: "Shift Report" },
+];
+
+const ADMIN_NAV = [
+  { id: "audit",   icon: "🔒", label: "Audit Log" },
+];
+
 export default function App() {
   const { user, logout } = useAuth();
   const [showDemo, setShowDemo] = useState(false);
@@ -879,6 +906,7 @@ export default function App() {
   const [logs, setLogs] = useState([]);
   const [scanComplete, setScanComplete] = useState(false);
   const [activeTab, setActiveTab] = useState("scanner");
+  const [toasts, setToasts] = useState([]);
 
   const addLog = (zone, message) => {
     const time = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -925,6 +953,36 @@ export default function App() {
     Authorization: `Bearer ${user?.token}`,
   });
 
+  const addToast = useCallback((msg) => {
+    const id = Date.now();
+    setToasts(prev => [...prev.slice(-4), { id, ...msg }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 8000);
+  }, []);
+
+  // WebSocket — real-time queue/bed/alert updates
+  const handleWsMsg = useCallback((msg) => {
+    switch (msg.event) {
+      case "patient_added":
+        setQueue(prev => {
+          if (prev.find(p => p.patient_id === msg.patient_id)) return prev;
+          return [...prev, msg].sort((a, b) => a.esi_level - b.esi_level);
+        });
+        break;
+      case "patient_discharged":
+        setQueue(prev => prev.filter(p => p.patient_id !== msg.patient_id));
+        break;
+      case "monitor_alert": {
+        const a = msg.alert || {};
+        addToast({ level: a.level || "warning", text: a.message || "Clinical alert" });
+        break;
+      }
+      default: break;
+    }
+  }, [addToast]);
+
+  const wsUrl = user?.token ? `${WS_BASE}/ws?token=${user.token}` : null;
+  const { connected: wsConnected } = useWebSocket(wsUrl, handleWsMsg);
+
   const fetchQueue = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE}/queue`, { headers: { Authorization: `Bearer ${user?.token}` } });
@@ -937,13 +995,12 @@ export default function App() {
 
   const dischargePatient = async (patientId) => {
     await fetch(`${API_BASE}/queue/${patientId}`, { method: "DELETE", headers: authHeaders() });
-    fetchQueue();
+    // WS will update queue; fallback refetch in case WS is down
+    setTimeout(fetchQueue, 500);
   };
 
   useEffect(() => {
-    fetchQueue();
-    const interval = setInterval(fetchQueue, 10000);
-    return () => clearInterval(interval);
+    fetchQueue(); // initial load; WS handles live updates thereafter
   }, [fetchQueue]);
 
   const startScan = () => {
@@ -1030,59 +1087,95 @@ export default function App() {
     };
   };
 
+  const criticalCount = queue.filter(p => p.esi_level === 1).length;
+  const allNav = [
+    ...NAV_ITEMS,
+    ...STAFF_NAV,
+    ...(user?.role === "admin" ? ADMIN_NAV : []),
+  ];
+
   return (
-    <div className="app">
+    <div className="app-shell">
       {showDemo && <DemoPlayer onClose={() => setShowDemo(false)} />}
-      {/* Header */}
-      <header className="app-header">
-        <div className="header-inner">
-          <div className="header-logo">
-            <span className="logo-icon">⚕</span>
-            <div>
-              <div className="logo-title">MediScan Gateway</div>
-              <div className="logo-sub">AI-Powered Walk-Through Patient Intake & Instant Triage</div>
+
+      {/* Toast notifications */}
+      {toasts.length > 0 && (
+        <div className="toast-stack">
+          {toasts.map(t => (
+            <div
+              key={t.id}
+              className={`toast ${t.level}`}
+              onClick={() => setToasts(prev => prev.filter(x => x.id !== t.id))}
+            >
+              {t.level === "critical" ? "🚨 " : t.level === "warning" ? "⚠️ " : "ℹ️ "}{t.text}
             </div>
-          </div>
-          <div className="header-stats">
-            <div className="stat-pill critical">{queue.filter(p => p.esi_level === 1).length} Critical</div>
-            <div className="stat-pill urgent">{queue.filter(p => p.esi_level <= 2).length} High Acuity</div>
-            <div className="stat-pill total">{queue.length} In Queue</div>
-            <div className="header-user">
-              <button className="demo-btn" onClick={() => setShowDemo(true)}>▶ Demo</button>
-              <span className="user-name">{user?.name}</span>
-              <span className="user-role">{user?.role}</span>
-              <button className="logout-btn" onClick={logout}>Sign Out</button>
-            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Sidebar */}
+      <aside className="sidebar">
+        <div className="sidebar-brand">
+          <div className="sidebar-brand-icon">⚕</div>
+          <div>
+            <div className="sidebar-brand-name">MediScan</div>
+            <div className="sidebar-brand-sub">Gateway v2</div>
           </div>
         </div>
-      </header>
 
-      <div className="app-tabs">
-        <button className={`tab ${activeTab === "scanner" ? "active" : ""}`} onClick={() => setActiveTab("scanner")}>
-          📡 Patient Scanner
-        </button>
-        <button className={`tab ${activeTab === "queue" ? "active" : ""}`} onClick={() => setActiveTab("queue")}>
-          🏥 ER Queue {queue.length > 0 && <span className="tab-badge">{queue.length}</span>}
-        </button>
-        <button className={`tab ${activeTab === "analytics" ? "active" : ""}`} onClick={() => setActiveTab("analytics")}>
-          📊 Command Dashboard
-        </button>
-        <button className={`tab ${activeTab === "beds" ? "active" : ""}`} onClick={() => setActiveTab("beds")}>
-          🛏 Bed Board
-        </button>
-        {(user?.role === "admin" || user?.role === "nurse" || user?.role === "physician") && (
-          <button className={`tab ${activeTab === "report" ? "active" : ""}`} onClick={() => setActiveTab("report")}>
-            📋 Shift Report
-          </button>
-        )}
-        {user?.role === "admin" && (
-          <button className={`tab ${activeTab === "audit" ? "active" : ""}`} onClick={() => setActiveTab("audit")}>
-            🔒 Audit Log
-          </button>
-        )}
-      </div>
+        <nav className="sidebar-nav">
+          {allNav.map(item => (
+            <button
+              key={item.id}
+              className={`nav-item ${activeTab === item.id ? "active" : ""}`}
+              onClick={() => setActiveTab(item.id)}
+            >
+              <span className="nav-item-icon">{item.icon}</span>
+              {item.label}
+              {item.badge && queue.length > 0 && (
+                <span className="nav-badge">{queue.length}</span>
+              )}
+              {item.id === "queue" && criticalCount > 0 && (
+                <span className="nav-badge" style={{ background: "var(--esi-1)" }}>{criticalCount}!</span>
+              )}
+            </button>
+          ))}
+        </nav>
 
-      <main className="app-main">
+        <div className="sidebar-footer">
+          <div className="ws-indicator">
+            <div className={`ws-dot ${wsConnected ? "online" : "offline"}`} />
+            {wsConnected ? "Live updates" : "Reconnecting…"}
+          </div>
+          <button className="demo-btn" style={{ width: "100%", fontSize: 12, padding: "8px" }} onClick={() => setShowDemo(true)}>
+            ▶ Run Demo
+          </button>
+          <div className="sidebar-user">
+            <div className="sidebar-user-avatar">{user?.name?.[0] || "?"}</div>
+            <div className="sidebar-user-info">
+              <div className="sidebar-user-name">{user?.name}</div>
+              <div className="sidebar-user-role">{user?.role}</div>
+            </div>
+            <button className="signout-btn" onClick={logout} title="Sign out">⎋</button>
+          </div>
+        </div>
+      </aside>
+
+      {/* Main area */}
+      <div className="main-area">
+        <header className="topbar">
+          <div className="topbar-title">{PAGE_TITLES[activeTab]}</div>
+          <div className="topbar-stats">
+            {criticalCount > 0 && <span className="stat-pill critical">🚨 {criticalCount} Critical</span>}
+            <span className="stat-pill high">{queue.filter(p => p.esi_level <= 2).length} High Acuity</span>
+            <span className="stat-pill">{queue.length} In Queue</span>
+            <span className={`stat-pill ${wsConnected ? "online" : ""}`}>
+              {wsConnected ? "⬤ Live" : "⬤ Offline"}
+            </span>
+          </div>
+        </header>
+
+      <main className="content-area">
         {activeTab === "scanner" && (
           <div className="scanner-layout">
             {/* LEFT — Input + Portal */}
@@ -1334,6 +1427,7 @@ export default function App() {
         {activeTab === "report" && <ShiftReportPanel user={user} />}
         {activeTab === "audit" && <AuditLogPanel user={user} />}
       </main>
+      </div>
     </div>
   );
 }

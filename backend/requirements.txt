@@ -11,3 +11,7 @@ httpx
 sqlalchemy
 psycopg2-binary
 reportlab
+pyotp
+qrcode[pil]
+pillow
+websockets

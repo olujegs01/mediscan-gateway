@@ -26,17 +26,19 @@ export function AuthProvider({ children }) {
       .finally(() => setLoading(false));
   }, [logout]);
 
-  const login = async (username, password) => {
+  const login = async (username, password, totp_code = undefined) => {
     const res = await fetch(`${API_BASE}/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ username, password, ...(totp_code ? { totp_code } : {}) }),
     });
     if (!res.ok) {
       const err = await res.json();
       throw new Error(err.detail || "Login failed");
     }
     const data = await res.json();
+    // mfa_required = true means password was correct but MFA code still needed
+    if (data.mfa_required) return data;
     localStorage.setItem("mediscan_token", data.access_token);
     setUser({ username, role: data.role, name: data.name, token: data.access_token });
     return data;

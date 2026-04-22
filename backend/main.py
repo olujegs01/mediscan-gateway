@@ -3,7 +3,7 @@ import json
 from datetime import datetime
 from typing import List
 
-from fastapi import FastAPI, Depends, Query, HTTPException, status, Request
+from fastapi import FastAPI, Depends, Query, HTTPException, status, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
 import jwt as pyjwt
@@ -14,7 +14,10 @@ from biometric import identify_patient, pull_ehr, verify_insurance
 from triage import run_ai_triage
 from notifications import generate_wristband, send_phone_push, send_family_alert, stage_care_orders
 from alerts import notify_physician
-from auth import LoginRequest, TokenResponse, verify_token, require_role, login, SECRET_KEY, ALGORITHM
+from auth import (
+    LoginRequest, TokenResponse, verify_token, require_role, login,
+    SECRET_KEY, ALGORITHM, setup_mfa, enable_mfa,
+)
 from database import init_db, get_db
 from patient_store import (
     upsert_patient, load_active_patients, discharge_patient_db,
@@ -24,6 +27,9 @@ from patient_store import (
 from audit import AuditMiddleware
 from pdf_report import generate_shift_pdf
 from demo_data import get_demo_patient
+from websocket_manager import manager as ws_manager
+from monitor import monitoring_loop
+from fhir_client import search_patient, get_conditions, get_medications, fhir_available
 from sqlalchemy.orm import Session
 from pydantic import BaseModel as PydanticBase
 
@@ -39,7 +45,7 @@ app.add_middleware(AuditMiddleware)
 
 
 @app.on_event("startup")
-def startup():
+async def startup():
     init_db()
     db = next(get_db())
     try:
@@ -49,6 +55,11 @@ def startup():
             er_queue.append(p)
     finally:
         db.close()
+    # Start background monitoring loop
+    asyncio.create_task(monitoring_loop(
+        get_queue_fn=lambda: er_queue,
+        broadcast_fn=ws_manager.broadcast_all,
+    ))
 
 
 _demo_counter = 0
@@ -69,6 +80,51 @@ def auth_me(token: dict = Depends(verify_token)):
     return {"username": token["sub"], "role": token["role"]}
 
 
+@app.get("/auth/mfa/setup")
+def mfa_setup(token: dict = Depends(verify_token)):
+    return setup_mfa(token["sub"])
+
+
+@app.post("/auth/mfa/enable")
+def mfa_enable(code: str = Query(...), token: dict = Depends(verify_token)):
+    if not enable_mfa(token["sub"], code):
+        raise HTTPException(status_code=400, detail="Invalid TOTP code")
+    return {"mfa_enabled": True}
+
+
+@app.get("/auth/fhir_status")
+def fhir_status(_: dict = Depends(verify_token)):
+    return {"fhir_available": fhir_available()}
+
+
+# ── WebSockets ────────────────────────────────────────────────────────────────
+
+@app.websocket("/ws")
+async def ws_staff(websocket: WebSocket, token: str = Query(...)):
+    try:
+        pyjwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except Exception:
+        await websocket.close(code=4001)
+        return
+    await ws_manager.connect_staff(websocket)
+    try:
+        while True:
+            await websocket.receive_text()  # keep alive; client sends pings
+    except WebSocketDisconnect:
+        ws_manager.disconnect(websocket)
+
+
+@app.websocket("/ws/lobby")
+async def ws_lobby(websocket: WebSocket):
+    """Public WebSocket for lobby displays — no PHI."""
+    await ws_manager.connect_lobby(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        ws_manager.disconnect(websocket)
+
+
 # ── Queue (protected) ─────────────────────────────────────────────────────────
 
 @app.get("/queue")
@@ -86,6 +142,11 @@ def discharge_patient(
     er_queue = [p for p in er_queue if p["patient_id"] != patient_id]
     discharge_patient_db(db, patient_id)
     write_audit(db, token["sub"], token["role"], "discharge", patient_id=patient_id)
+    asyncio.create_task(ws_manager.broadcast_all(
+        "patient_discharged",
+        {"patient_id": patient_id},
+        {"patient_id": patient_id},
+    ))
     return {"discharged": patient_id}
 
 
@@ -223,6 +284,7 @@ def update_bed_status(
         raise HTTPException(status_code=404, detail="Bed not found")
     write_audit(db, token["sub"], token["role"], "update_bed",
                 details={"room": room, "status": body.status})
+    asyncio.create_task(ws_manager.broadcast_all("bed_updated", result, result))
     return result
 
 
@@ -484,9 +546,25 @@ async def scan_stream(
         await asyncio.sleep(0.3)
 
         ehr = pull_ehr(patient_id, name, age)
+
+        # Enrich with Epic FHIR if available
+        if fhir_available():
+            try:
+                fhir_pt = search_patient(biometric.name or name)
+                if fhir_pt and fhir_pt.get("fhir_id"):
+                    fid = fhir_pt["fhir_id"]
+                    fhir_conditions = get_conditions(fid)
+                    fhir_meds = get_medications(fid)
+                    if fhir_conditions:
+                        ehr.history = list(set(ehr.history + fhir_conditions))
+                    if fhir_meds:
+                        ehr.current_medications = list(set(ehr.current_medications + fhir_meds))
+            except Exception as fe:
+                print(f"FHIR enrich error: {fe}")
+
         yield sse("zone2_ehr", {
             "zone": 2,
-            "message": "EHR pulled from Epic/Cerner",
+            "message": f"EHR pulled from {'Epic FHIR R4' if fhir_available() else 'Epic/Cerner (simulated)'}",
             "data": ehr.dict(),
         })
         await asyncio.sleep(0.3)
@@ -611,6 +689,7 @@ async def scan_stream(
         }
 
         er_queue.append(result)
+        asyncio.create_task(ws_manager.broadcast_all("patient_added", result))
 
         # Persist to DB
         try:
