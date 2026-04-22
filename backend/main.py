@@ -33,6 +33,7 @@ from fhir_client import search_patient, get_conditions, get_medications, fhir_av
 from sqlalchemy.orm import Session
 from pydantic import BaseModel as PydanticBase
 from symptom_check import run_assessment, CARE_LEVELS
+from analytics_engine import get_full_analytics
 from scheduler import get_available_slots, book_slot, seed_slots
 from soap_note import generate_soap_note, save_soap_note, get_soap_note, finalize_note
 from clinical_journeys import (
@@ -188,52 +189,12 @@ def health():
 
 @app.get("/analytics")
 def get_analytics(_: dict = Depends(verify_token), db: Session = Depends(get_db)):
-    import random
-
-    total = len(er_queue)
-    esi_counts = {str(i): sum(1 for p in er_queue if p["esi_level"] == i) for i in range(1, 6)}
-    sepsis_alerts = sum(1 for p in er_queue if p.get("triage_detail", {}).get("sepsis_probability") in ("high", "critical"))
-    bh_patients = sum(1 for p in er_queue if p.get("triage_detail", {}).get("behavioral_health_flag"))
-    admission_likely = sum(1 for p in er_queue if p.get("triage_detail", {}).get("admission_probability", 0) >= 60)
-    lwbs_high_risk = sum(1 for p in er_queue if p.get("triage_detail", {}).get("lwbs_risk") == "high")
-
-    avg_wait = 0
-    if er_queue:
-        waits = [p.get("wait_time_estimate", 0) for p in er_queue]
-        avg_wait = int(sum(waits) / len(waits))
-
-    # Real bed data from DB
-    beds = get_bed_summary(db)
-    occupancy_pct = beds["occupancy_percent"]
-    boarding_patients = beds["boarding_patients"]
-
-    return {
-        "timestamp": datetime.utcnow().isoformat(),
-        "queue": {
-            "total_patients": total,
-            "esi_breakdown": esi_counts,
-            "avg_wait_minutes": avg_wait,
-            "sepsis_alerts": sepsis_alerts,
-            "behavioral_health": bh_patients,
-            "admission_likely": admission_likely,
-            "lwbs_high_risk": lwbs_high_risk,
-        },
-        "capacity": {
-            "total_beds": beds["total_beds"],
-            "occupied_beds": beds["occupied_beds"],
-            "available_beds": beds["available_beds"],
-            "boarding_patients": boarding_patients,
-            "occupancy_percent": occupancy_pct,
-            "status": "critical" if occupancy_pct >= 90 else ("high" if occupancy_pct >= 75 else ("moderate" if occupancy_pct >= 50 else "normal")),
-        },
-        "performance": {
-            "door_to_triage_seconds": random.randint(12, 18),
-            "lwbs_rate_today": round(random.uniform(0.8, 3.2), 1),
-            "avg_los_minutes": random.randint(142, 210),
-            "patients_seen_today": random.randint(total + 12, total + 45),
-        },
-        "alerts": _generate_ed_alerts(er_queue, occupancy_pct, boarding_patients),
-    }
+    """Full analytics payload — replaces the old endpoint, returns everything."""
+    data = get_full_analytics(db, er_queue)
+    # Preserve legacy alert format for any existing consumers
+    cap = data["capacity"]
+    data["alerts"] = _generate_ed_alerts(er_queue, cap["occupancy_percent"], cap["boarding_patients"])
+    return data
 
 
 def _generate_ed_alerts(queue: list, occupancy: float, boarding: int) -> list:

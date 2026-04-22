@@ -3,6 +3,7 @@ import "./App.css";
 import { useAuth, API_BASE } from "./AuthContext";
 import { useWebSocket } from "./hooks/useWebSocket";
 import ClinicalJourneys from "./ClinicalJourneys";
+import OutcomesDashboard from "./OutcomesDashboard";
 
 const WS_BASE = API_BASE.replace(/^https/, "wss").replace(/^http/, "ws");
 
@@ -248,159 +249,6 @@ function PatientQueueCard({ patient, onDischarge, onSOAP }) {
         <button className="discharge-btn" onClick={() => onDischarge(patient.patient_id)}>
           Discharge
         </button>
-      </div>
-    </div>
-  );
-}
-
-function AnalyticsDashboard({ user }) {
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
-
-  const fetchAnalytics = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_BASE}/analytics`, {
-        headers: { Authorization: `Bearer ${user?.token}` },
-      });
-      const json = await res.json();
-      setData(json);
-    } catch (e) {
-      console.error("Analytics error:", e);
-    } finally {
-      setLoading(false);
-    }
-  }, [user?.token]);
-
-  useEffect(() => {
-    fetchAnalytics();
-    const interval = setInterval(fetchAnalytics, 15000);
-    return () => clearInterval(interval);
-  }, [fetchAnalytics]);
-
-  if (loading) return <div className="analytics-loading">Loading analytics...</div>;
-  if (!data) return null;
-
-  const cap = data.capacity;
-  const q = data.queue;
-  const perf = data.performance;
-
-  const capColor = cap.status === "critical" ? "#dc2626" : cap.status === "high" ? "#ea580c" : cap.status === "moderate" ? "#ca8a04" : "#22c55e";
-
-  return (
-    <div className="analytics-layout">
-      {/* Live Alerts */}
-      {data.alerts?.length > 0 && (
-        <div className="alert-strip">
-          {data.alerts.map((a, i) => (
-            <div key={i} className={`alert-item alert-${a.level}`}>
-              {a.level === "critical" ? "🚨" : a.level === "warning" ? "⚠️" : "ℹ️"} {a.message}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Capacity Overview */}
-      <div className="analytics-section">
-        <h3 className="section-title">ED Capacity</h3>
-        <div className="metrics-grid">
-          <div className="metric-card">
-            <div className="metric-val" style={{ color: capColor }}>{cap.occupancy_percent}%</div>
-            <div className="metric-label">Occupancy</div>
-            <div className="capacity-bar"><div className="capacity-fill" style={{ width: `${cap.occupancy_percent}%`, background: capColor }} /></div>
-          </div>
-          <div className="metric-card">
-            <div className="metric-val">{cap.occupied_beds}<span className="metric-sub">/{cap.total_beds}</span></div>
-            <div className="metric-label">Beds Occupied</div>
-          </div>
-          <div className="metric-card">
-            <div className="metric-val" style={{ color: cap.boarding_patients > 3 ? "#ea580c" : "#94a3b8" }}>{cap.boarding_patients}</div>
-            <div className="metric-label">Boarding Patients</div>
-          </div>
-          <div className="metric-card">
-            <div className="metric-val" style={{ color: "#22c55e" }}>{perf.door_to_triage_seconds}s</div>
-            <div className="metric-label">Door-to-Triage</div>
-            <div className="metric-note">National avg: 28 min</div>
-          </div>
-        </div>
-      </div>
-
-      {/* Queue Intelligence */}
-      <div className="analytics-section">
-        <h3 className="section-title">Queue Intelligence</h3>
-        <div className="metrics-grid">
-          <div className="metric-card">
-            <div className="metric-val">{q.total_patients}</div>
-            <div className="metric-label">In Queue</div>
-          </div>
-          <div className="metric-card">
-            <div className="metric-val">{q.avg_wait_minutes} min</div>
-            <div className="metric-label">Avg Wait</div>
-            <div className="metric-note">National avg: 162 min</div>
-          </div>
-          <div className="metric-card">
-            <div className="metric-val" style={{ color: q.sepsis_alerts > 0 ? "#dc2626" : "#22c55e" }}>{q.sepsis_alerts}</div>
-            <div className="metric-label">Sepsis Alerts</div>
-          </div>
-          <div className="metric-card">
-            <div className="metric-val" style={{ color: q.behavioral_health > 0 ? "#a78bfa" : "#94a3b8" }}>{q.behavioral_health}</div>
-            <div className="metric-label">Behavioral Health</div>
-          </div>
-          <div className="metric-card">
-            <div className="metric-val" style={{ color: q.admission_likely > 0 ? "#f97316" : "#94a3b8" }}>{q.admission_likely}</div>
-            <div className="metric-label">Likely Admissions</div>
-          </div>
-          <div className="metric-card">
-            <div className="metric-val" style={{ color: q.lwbs_high_risk > 0 ? "#ca8a04" : "#22c55e" }}>{q.lwbs_high_risk}</div>
-            <div className="metric-label">LWBS Risk</div>
-          </div>
-        </div>
-      </div>
-
-      {/* ESI Breakdown */}
-      <div className="analytics-section">
-        <h3 className="section-title">ESI Breakdown</h3>
-        <div className="esi-breakdown">
-          {[1,2,3,4,5].map(esi => {
-            const cfg = ESI_CONFIG[esi];
-            const count = q.esi_breakdown?.[String(esi)] || 0;
-            return (
-              <div key={esi} className="esi-bar-item">
-                <div className="esi-bar-label" style={{ color: cfg.color }}>ESI {esi}</div>
-                <div className="esi-bar-track">
-                  <div className="esi-bar-fill" style={{ width: count > 0 ? `${Math.min(100, count * 20)}%` : "0%", background: cfg.color }} />
-                </div>
-                <div className="esi-bar-count" style={{ color: cfg.color }}>{count}</div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Performance vs National */}
-      <div className="analytics-section">
-        <h3 className="section-title">MediScan vs National Average</h3>
-        <div className="comparison-table">
-          <div className="comp-row">
-            <span className="comp-metric">Door-to-Triage</span>
-            <span className="comp-national">28 min national avg</span>
-            <span className="comp-mediscan" style={{ color: "#22c55e" }}>{perf.door_to_triage_seconds}s ↓97%</span>
-          </div>
-          <div className="comp-row">
-            <span className="comp-metric">LWBS Rate</span>
-            <span className="comp-national">5%+ national avg</span>
-            <span className="comp-mediscan" style={{ color: "#22c55e" }}>{perf.lwbs_rate_today}% today</span>
-          </div>
-          <div className="comp-row">
-            <span className="comp-metric">Avg LOS</span>
-            <span className="comp-national">162 min national avg</span>
-            <span className="comp-mediscan" style={{ color: perf.avg_los_minutes < 162 ? "#22c55e" : "#f97316" }}>{perf.avg_los_minutes} min</span>
-          </div>
-          <div className="comp-row">
-            <span className="comp-metric">Patients Seen Today</span>
-            <span className="comp-national">—</span>
-            <span className="comp-mediscan">{perf.patients_seen_today}</span>
-          </div>
-        </div>
       </div>
     </div>
   );
@@ -1466,7 +1314,7 @@ export default function App() {
           </div>
         )}
 
-        {activeTab === "analytics" && <AnalyticsDashboard user={user} />}
+        {activeTab === "analytics" && <OutcomesDashboard user={user} />}
         {activeTab === "beds" && <BedBoard user={user} />}
         {activeTab === "report"     && <ShiftReportPanel user={user} />}
         {activeTab === "audit"      && <AuditLogPanel user={user} />}

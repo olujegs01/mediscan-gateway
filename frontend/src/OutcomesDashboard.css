@@ -1,0 +1,507 @@
+/* ── Outcomes Dashboard ──────────────────────────────────────────────────── */
+
+.outcomes-dashboard {
+  padding: 0 0 40px 0;
+  font-family: 'Inter', sans-serif;
+  color: #e2e8f0;
+  min-height: 100%;
+}
+
+/* ── Loading ── */
+.dash-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 300px;
+  gap: 14px;
+  color: #475569;
+  font-size: 14px;
+}
+
+.dash-spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid #1e293b;
+  border-top-color: #0d9488;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+/* ── Alert strip ── */
+.alert-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 0;
+  margin-bottom: 8px;
+}
+
+.alert-item {
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.alert-critical { background: #450a0a; color: #fca5a5; border: 1px solid #dc2626; }
+.alert-warning  { background: #431407; color: #fdba74; border: 1px solid #ea580c; }
+.alert-info     { background: #0c2340; color: #93c5fd; border: 1px solid #1d4ed8; }
+
+/* ── Toolbar ── */
+.dash-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid #1e293b;
+}
+
+.dash-toolbar-left {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+}
+
+.dash-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: #f1f5f9;
+  letter-spacing: -0.3px;
+}
+
+.dash-refresh {
+  font-size: 11px;
+  color: #475569;
+}
+
+.dash-export-btn {
+  padding: 7px 16px;
+  background: transparent;
+  border: 1px solid #1e293b;
+  color: #94a3b8;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.dash-export-btn:hover {
+  border-color: #0d9488;
+  color: #5eead4;
+}
+
+/* ── KPI grid ── */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+@media (max-width: 1200px) {
+  .kpi-grid { grid-template-columns: repeat(3, 1fr); }
+}
+
+@media (max-width: 700px) {
+  .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+.kpi-card {
+  background: #0f1923;
+  border: 1px solid #1e293b;
+  border-radius: 10px;
+  padding: 16px;
+  transition: border-color 0.15s;
+}
+
+.kpi-card:hover {
+  border-color: #334155;
+}
+
+.kpi-value {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.5px;
+}
+
+.kpi-unit {
+  font-size: 14px;
+  font-weight: 400;
+  margin-left: 2px;
+  opacity: 0.8;
+}
+
+.kpi-label {
+  font-size: 11px;
+  color: #64748b;
+  margin-top: 5px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.kpi-sub {
+  font-size: 11px;
+  color: #475569;
+  margin-top: 4px;
+}
+
+.kpi-benchmark {
+  font-size: 10px;
+  color: #334155;
+  margin-top: 3px;
+}
+
+/* ── Two-column row ── */
+.dash-row-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+@media (max-width: 900px) {
+  .dash-row-2 { grid-template-columns: 1fr; }
+}
+
+/* ── Section card ── */
+.dash-section {
+  background: #0f1923;
+  border: 1px solid #1e293b;
+  border-radius: 10px;
+  padding: 18px 20px;
+  margin-bottom: 16px;
+}
+
+.dash-section-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.dash-section-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #e2e8f0;
+  margin: 0;
+}
+
+.dash-section-sub {
+  font-size: 11px;
+  color: #475569;
+  margin: 4px 0 0 0;
+  line-height: 1.4;
+}
+
+/* ── Chart tooltip ── */
+.chart-tooltip {
+  background: #0c1420;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 12px;
+}
+
+.tooltip-label {
+  color: #94a3b8;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.tooltip-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 3px;
+}
+
+/* ── Benchmark rows ── */
+.benchmarks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-top: 4px;
+}
+
+.benchmark-row {
+  display: grid;
+  grid-template-columns: 130px 1fr 90px;
+  align-items: center;
+  gap: 12px;
+}
+
+.bench-metric {
+  font-size: 12px;
+  color: #94a3b8;
+  font-weight: 500;
+}
+
+.bench-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bench-bar-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bench-bar-label {
+  font-size: 9px;
+  width: 42px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  flex-shrink: 0;
+}
+
+.bench-bar-label.yours    { color: #5eead4; }
+.bench-bar-label.national { color: #475569; }
+
+.bench-track {
+  flex: 1;
+  height: 6px;
+  background: #1e293b;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.bench-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.6s ease;
+}
+
+.bench-fill.national { background: #334155; }
+
+.bench-val {
+  font-size: 11px;
+  font-weight: 600;
+  width: 52px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.bench-val.national-val { color: #475569; }
+
+.bench-delta {
+  font-size: 11px;
+  font-weight: 600;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.bench-delta.good { color: #4ade80; }
+.bench-delta.bad  { color: #f87171; }
+
+/* ── Funnel chart ── */
+.funnel-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.funnel-stage {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.funnel-bar-wrap {
+  width: 100%;
+}
+
+.funnel-bar {
+  height: 26px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  transition: width 0.5s ease;
+  min-width: 50px;
+}
+
+.funnel-count {
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.funnel-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: #64748b;
+  padding: 0 2px;
+}
+
+.funnel-pct {
+  color: #475569;
+}
+
+/* ── Journey KPI mini row ── */
+.journey-kpi-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.journey-kpi {
+  background: #0a1420;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  padding: 10px;
+  text-align: center;
+}
+
+.journey-kpi-val {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.journey-kpi-label {
+  font-size: 10px;
+  color: #64748b;
+  margin-top: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+/* ── Diversion layout ── */
+.diversion-content {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.diversion-legend {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.div-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.div-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.div-label {
+  flex: 1;
+  color: #94a3b8;
+}
+
+.div-count {
+  font-weight: 600;
+  color: #e2e8f0;
+  min-width: 30px;
+  text-align: right;
+}
+
+.div-pct {
+  color: #475569;
+  min-width: 34px;
+  text-align: right;
+  font-size: 11px;
+}
+
+/* ── Sepsis compliance ── */
+.sepsis-header-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.sepsis-stat {
+  text-align: center;
+  padding: 10px;
+  background: #0a1420;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+}
+
+.sepsis-stat-val {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.sepsis-stat-label {
+  font-size: 10px;
+  color: #64748b;
+  margin-top: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.sepsis-components {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sepsis-comp-row {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  align-items: center;
+  gap: 12px;
+}
+
+.sepsis-comp-name {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.sepsis-comp-bars {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sepsis-track {
+  flex: 1;
+  height: 8px;
+  background: #1e293b;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.sepsis-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.5s ease;
+}
+
+.sepsis-val {
+  font-size: 12px;
+  font-weight: 600;
+  color: #e2e8f0;
+  min-width: 36px;
+  text-align: right;
+}
+
+.sepsis-bench {
+  font-size: 10px;
+  color: #475569;
+  min-width: 48px;
+}
+
+/* ── Spin animation (reuse from app) ── */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
