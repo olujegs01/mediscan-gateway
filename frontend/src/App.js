@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 import "./App.css";
 import { useAuth, API_BASE } from "./AuthContext";
 import { useWebSocket } from "./hooks/useWebSocket";
+import ClinicalJourneys from "./ClinicalJourneys";
 
 const WS_BASE = API_BASE.replace(/^https/, "wss").replace(/^http/, "ws");
 
@@ -182,7 +183,7 @@ function TriageCard({ data }) {
   );
 }
 
-function PatientQueueCard({ patient, onDischarge }) {
+function PatientQueueCard({ patient, onDischarge, onSOAP }) {
   const cfg = ESI_CONFIG[patient.esi_level] || ESI_CONFIG[5];
   const td = patient.triage_detail || {};
   const sepsisCritical = ["high", "critical"].includes(td.sepsis_probability);
@@ -240,9 +241,14 @@ function PatientQueueCard({ patient, onDischarge }) {
         </div>
       )}
 
-      <button className="discharge-btn" onClick={() => onDischarge(patient.patient_id)}>
-        Discharge
-      </button>
+      <div className="queue-card-actions">
+        <button className="soap-btn" onClick={() => onSOAP(patient)}>
+          📝 SOAP Note
+        </button>
+        <button className="discharge-btn" onClick={() => onDischarge(patient.patient_id)}>
+          Discharge
+        </button>
+      </div>
     </div>
   );
 }
@@ -864,12 +870,14 @@ const COMPLAINT_CATEGORIES = {
 };
 
 const PAGE_TITLES = {
-  scanner:   "Patient Scanner",
-  queue:     "ER Queue",
-  analytics: "Command Dashboard",
-  beds:      "Bed Board",
-  report:    "Shift Report",
-  audit:     "Audit Log",
+  scanner:    "Patient Scanner",
+  queue:      "ER Queue",
+  analytics:  "Command Dashboard",
+  beds:       "Bed Board",
+  report:     "Shift Report",
+  journeys:   "Clinical Journeys",
+  audit:      "Audit Log",
+  compliance: "Compliance Center",
 };
 
 const NAV_ITEMS = [
@@ -877,14 +885,16 @@ const NAV_ITEMS = [
   { id: "queue",     icon: "🏥", label: "ER Queue",       badge: true },
   { id: "analytics", icon: "📊", label: "Command",        },
   { id: "beds",      icon: "🛏", label: "Bed Board",      },
+  { id: "journeys",  icon: "🩺", label: "Journeys",       journeyBadge: true },
 ];
 
 const STAFF_NAV = [
-  { id: "report",  icon: "📋", label: "Shift Report" },
+  { id: "report",    icon: "📋", label: "Shift Report" },
 ];
 
 const ADMIN_NAV = [
-  { id: "audit",   icon: "🔒", label: "Audit Log" },
+  { id: "audit",      icon: "🔒", label: "Audit Log" },
+  { id: "compliance", icon: "🛡", label: "Compliance" },
 ];
 
 export default function App() {
@@ -907,6 +917,9 @@ export default function App() {
   const [scanComplete, setScanComplete] = useState(false);
   const [activeTab, setActiveTab] = useState("scanner");
   const [toasts, setToasts] = useState([]);
+  const [journeyEscalations, setJourneyEscalations] = useState(0);
+  const [soapModal, setSoapModal] = useState(null); // { patientId, patientName, note }
+  const [soapLoading, setSoapLoading] = useState(false);
 
   const addLog = (zone, message) => {
     const time = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -976,6 +989,10 @@ export default function App() {
         addToast({ level: a.level || "warning", text: a.message || "Clinical alert" });
         break;
       }
+      case "journey_escalation":
+        setJourneyEscalations(n => n + 1);
+        addToast({ level: "critical", text: `🚨 Journey escalation: ${msg.name} reported worsening symptoms` });
+        break;
       default: break;
     }
   }, [addToast]);
@@ -995,9 +1012,24 @@ export default function App() {
 
   const dischargePatient = async (patientId) => {
     await fetch(`${API_BASE}/queue/${patientId}`, { method: "DELETE", headers: authHeaders() });
-    // WS will update queue; fallback refetch in case WS is down
     setTimeout(fetchQueue, 500);
   };
+
+  const generateSoap = useCallback(async (patient) => {
+    setSoapModal({ patientId: patient.patient_id, patientName: patient.name, note: null });
+    setSoapLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/chart/note/${patient.patient_id}/generate`, {
+        method: "POST", headers: authHeaders(),
+      });
+      const note = await res.json();
+      setSoapModal({ patientId: patient.patient_id, patientName: patient.name, note });
+    } catch {
+      setSoapModal(null);
+    } finally {
+      setSoapLoading(false);
+    }
+  }, [user?.token]);
 
   useEffect(() => {
     fetchQueue(); // initial load; WS handles live updates thereafter
@@ -1137,6 +1169,9 @@ export default function App() {
               )}
               {item.id === "queue" && criticalCount > 0 && (
                 <span className="nav-badge" style={{ background: "var(--esi-1)" }}>{criticalCount}!</span>
+              )}
+              {item.journeyBadge && journeyEscalations > 0 && (
+                <span className="journey-alert-dot" title={`${journeyEscalations} escalation(s)`} />
               )}
             </button>
           ))}
@@ -1414,7 +1449,7 @@ export default function App() {
                   </div>
                   <div className="queue-cards">
                     {patients.map(p => (
-                      <PatientQueueCard key={p.patient_id} patient={p} onDischarge={dischargePatient} />
+                      <PatientQueueCard key={p.patient_id} patient={p} onDischarge={dischargePatient} onSOAP={generateSoap} />
                     ))}
                   </div>
                 </div>
@@ -1433,10 +1468,61 @@ export default function App() {
 
         {activeTab === "analytics" && <AnalyticsDashboard user={user} />}
         {activeTab === "beds" && <BedBoard user={user} />}
-        {activeTab === "report" && <ShiftReportPanel user={user} />}
-        {activeTab === "audit" && <AuditLogPanel user={user} />}
+        {activeTab === "report"     && <ShiftReportPanel user={user} />}
+        {activeTab === "audit"      && <AuditLogPanel user={user} />}
+        {activeTab === "journeys"   && <ClinicalJourneys activeTab="journeys" />}
+        {activeTab === "compliance" && <ClinicalJourneys activeTab="compliance" />}
       </main>
       </div>
+
+      {/* SOAP Note Modal */}
+      {(soapModal || soapLoading) && (
+        <div className="soap-overlay" onClick={() => setSoapModal(null)}>
+          <div className="soap-modal" onClick={e => e.stopPropagation()}>
+            <div className="soap-modal-header">
+              <h2>📝 SOAP Note — {soapModal?.patientName}</h2>
+              <button className="soap-close" onClick={() => setSoapModal(null)}>✕</button>
+            </div>
+            {soapLoading ? (
+              <div className="soap-loading">
+                <div className="soap-spinner" />
+                <p>Generating clinical note…</p>
+              </div>
+            ) : soapModal?.note ? (
+              <div className="soap-body">
+                {["subjective", "objective", "assessment", "plan"].map(section => (
+                  <div key={section} className="soap-section">
+                    <div className="soap-section-title">{section.toUpperCase()}</div>
+                    <div className="soap-section-text">{soapModal.note[section]}</div>
+                  </div>
+                ))}
+                <div className="soap-meta">
+                  Generated by AI · {new Date(soapModal.note.generated_at).toLocaleString()} · Review before finalizing
+                </div>
+                <div className="soap-actions">
+                  <button className="soap-copy-btn" onClick={() => {
+                    navigator.clipboard.writeText(soapModal.note.full_text);
+                    addToast({ level: "info", text: "SOAP note copied to clipboard" });
+                  }}>
+                    📋 Copy Full Note
+                  </button>
+                  {user?.role === "physician" && (
+                    <button className="soap-finalize-btn" onClick={async () => {
+                      await fetch(`${API_BASE}/chart/note/${soapModal.patientId}/finalize`, {
+                        method: "POST", headers: authHeaders(),
+                      });
+                      addToast({ level: "info", text: "SOAP note finalized" });
+                      setSoapModal(null);
+                    }}>
+                      ✓ Finalize Note
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

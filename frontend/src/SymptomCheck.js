@@ -340,7 +340,7 @@ function StepQA({ preliminary, questions, answers, onAnswer, onSubmit, loading }
   );
 }
 
-function ActionButtons({ cta, careLevel, onPreRegister }) {
+function ActionButtons({ cta, careLevel, onPreRegister, onSchedule }) {
   if (cta === "call") return (
     <a href="tel:911" className="sc-action-btn emergency">
       🚨 Call 911 Now
@@ -358,29 +358,201 @@ function ActionButtons({ cta, careLevel, onPreRegister }) {
   );
   if (cta === "urgent") return (
     <div className="sc-action-group">
-      <a href="https://maps.google.com/?q=urgent+care+near+me" target="_blank" rel="noopener noreferrer" className="sc-action-btn primary">
-        📍 Find Urgent Care
+      <button className="sc-action-btn primary" onClick={() => onSchedule("urgent_care")}>
+        📅 Book Urgent Care Slot
+      </button>
+      <a href="https://maps.google.com/?q=urgent+care+near+me" target="_blank" rel="noopener noreferrer" className="sc-action-btn secondary">
+        📍 Walk-in Locations
       </a>
     </div>
   );
   if (cta === "telehealth") return (
     <div className="sc-action-group">
-      <a href="https://doxy.me" target="_blank" rel="noopener noreferrer" className="sc-action-btn primary">
-        💻 Start Telehealth Visit
-      </a>
+      <button className="sc-action-btn primary" onClick={() => onSchedule("telehealth")}>
+        💻 Book Telehealth Visit
+      </button>
     </div>
   );
   if (cta === "primary") return (
     <div className="sc-action-group">
-      <a href="https://www.zocdoc.com" target="_blank" rel="noopener noreferrer" className="sc-action-btn primary">
+      <button className="sc-action-btn primary" onClick={() => onSchedule("primary_care")}>
         📅 Book Doctor Appointment
-      </a>
+      </button>
     </div>
   );
   return null;
 }
 
-function StepResult({ result, demographicData, symptomsData, onPreRegister, onRestart }) {
+// ── Scheduling step ───────────────────────────────────────────────────────────
+
+function SlotCard({ slot, onBook, booking }) {
+  const dateObj = new Date(`${slot.slot_date}T${slot.slot_time}`);
+  const isToday = slot.slot_date === new Date().toISOString().split("T")[0];
+  const isTomorrow = slot.slot_date === new Date(Date.now() + 86400000).toISOString().split("T")[0];
+  const dayLabel = isToday ? "Today" : isTomorrow ? "Tomorrow" : dateObj.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
+
+  return (
+    <div className={`sc-slot-card ${booking === slot.slot_id ? "booking" : ""}`}>
+      <div className="sc-slot-time">
+        <div className="sc-slot-day">{dayLabel}</div>
+        <div className="sc-slot-hour">{dateObj.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
+        <div className="sc-slot-duration">{slot.duration_min} min</div>
+      </div>
+      <div className="sc-slot-info">
+        <div className="sc-slot-provider">{slot.provider_name}</div>
+        <div className="sc-slot-specialty">{slot.specialty}</div>
+        <div className="sc-slot-location">📍 {slot.location}</div>
+        {slot.address && <div className="sc-slot-address">{slot.address}</div>}
+      </div>
+      <button
+        className="sc-slot-book-btn"
+        onClick={() => onBook(slot)}
+        disabled={booking != null}
+      >
+        {booking === slot.slot_id ? <span className="sc-spinner" /> : "Book →"}
+      </button>
+    </div>
+  );
+}
+
+function StepSchedule({ careType, demographicData, symptomsData, onDone, onSkip }) {
+  const [slots, setSlots] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [booking, setBooking] = useState(null);
+  const [confirmation, setConfirmation] = useState(null);
+  const [form, setForm] = useState({ name: "", phone: "" });
+  const [formStep, setFormStep] = useState(false);
+  const [selectedSlot, setSelectedSlot] = useState(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    fetch(`${API_BASE}/check/slots?care_type=${careType}`)
+      .then(r => r.json())
+      .then(d => { setSlots(d.slots || []); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, [careType]);
+
+  const handleSlotSelect = (slot) => {
+    setSelectedSlot(slot);
+    setFormStep(true);
+  };
+
+  const handleBook = async (e) => {
+    e.preventDefault();
+    if (!form.name.trim()) { setError("Please enter your name"); return; }
+    setBooking(selectedSlot.slot_id);
+    setError("");
+    try {
+      const res = await fetch(`${API_BASE}/check/schedule`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          slot_id: selectedSlot.slot_id,
+          patient_name: form.name.trim(),
+          patient_age: demographicData.age,
+          phone: form.phone.trim(),
+          symptoms: symptomsData.symptoms,
+        }),
+      });
+      if (!res.ok) throw new Error("Booking failed. Please try another slot.");
+      const data = await res.json();
+      setConfirmation(data);
+    } catch (err) {
+      setError(err.message);
+      setBooking(null);
+    }
+  };
+
+  const downloadIcal = () => {
+    if (!confirmation?.calendar_event) return;
+    const blob = new Blob([confirmation.calendar_event], { type: "text/calendar" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "appointment.ics";
+    a.click();
+  };
+
+  if (confirmation) return (
+    <div className="sc-step sc-confirm">
+      <div className="sc-confirm-icon">📅</div>
+      <h2>Appointment Booked!</h2>
+      <p>Your appointment has been confirmed.</p>
+      <div className="sc-confirm-id">
+        Confirmation: <strong>{confirmation.confirmation_id}</strong>
+      </div>
+      <div className="sc-booking-details">
+        <div className="sc-booking-row"><span>Provider</span><strong>{confirmation.provider_name}</strong></div>
+        <div className="sc-booking-row"><span>Date</span><strong>{new Date(`${confirmation.slot_date}T${confirmation.slot_time}`).toLocaleDateString([], { weekday: "long", year: "numeric", month: "long", day: "numeric" })}</strong></div>
+        <div className="sc-booking-row"><span>Time</span><strong>{new Date(`${confirmation.slot_date}T${confirmation.slot_time}`).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</strong></div>
+        <div className="sc-booking-row"><span>Location</span><strong>{confirmation.location}</strong></div>
+      </div>
+      {confirmation.instructions && (
+        <div className="sc-booking-instructions">{confirmation.instructions}</div>
+      )}
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 20 }}>
+        <button className="sc-action-btn primary" onClick={downloadIcal}>
+          📥 Add to Calendar (.ics)
+        </button>
+        <button className="sc-action-btn ghost" onClick={onDone}>Done</button>
+      </div>
+    </div>
+  );
+
+  const careLabels = { telehealth: "Telehealth", urgent_care: "Urgent Care", primary_care: "Primary Care" };
+
+  return (
+    <div className="sc-step">
+      <div className="sc-step-header">
+        <div className="sc-step-num">📅</div>
+        <div>
+          <h2>Book Your {careLabels[careType]} Appointment</h2>
+          <p>Select an available slot — instant confirmation, no phone call needed.</p>
+        </div>
+      </div>
+
+      {formStep && selectedSlot ? (
+        <form onSubmit={handleBook}>
+          <div className="sc-selected-slot-banner">
+            <strong>{selectedSlot.provider_name}</strong> ·{" "}
+            {new Date(`${selectedSlot.slot_date}T${selectedSlot.slot_time}`).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+            <button type="button" className="sc-change-slot" onClick={() => setFormStep(false)}>Change</button>
+          </div>
+          <div className="sc-field">
+            <label>Your Name</label>
+            <input type="text" className="sc-input" placeholder="Full name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} autoFocus />
+          </div>
+          <div className="sc-field">
+            <label>Phone <span className="sc-optional">(for reminders)</span></label>
+            <input type="tel" className="sc-input" placeholder="(555) 000-0000" value={form.phone} onChange={e => setForm(f => ({ ...f, phone: e.target.value }))} />
+          </div>
+          {error && <div className="sc-error">{error}</div>}
+          <button type="submit" className="sc-btn-primary" disabled={booking != null}>
+            {booking ? <><span className="sc-spinner" /> Booking…</> : "Confirm Appointment →"}
+          </button>
+        </form>
+      ) : loading ? (
+        <div style={{ textAlign: "center", padding: "40px 0" }}>
+          <div className="sc-loading-spinner" style={{ margin: "0 auto 12px" }} />
+          <div className="sc-loading-text">Finding available slots…</div>
+        </div>
+      ) : slots.length === 0 ? (
+        <div className="sc-empty-slots">No slots available at this time. Please call the office directly.</div>
+      ) : (
+        <div className="sc-slots-list">
+          {slots.map(slot => (
+            <SlotCard key={slot.slot_id} slot={slot} onBook={handleSlotSelect} booking={booking} />
+          ))}
+        </div>
+      )}
+
+      <button className="sc-action-btn ghost" onClick={onSkip} style={{ marginTop: 12 }}>
+        Skip — I'll call to schedule
+      </button>
+    </div>
+  );
+}
+
+function StepResult({ result, demographicData, symptomsData, onPreRegister, onSchedule, onRestart }) {
   const level = result.care_level || "SELF_CARE";
   const meta = result.care_level_meta || CARE_LEVEL_CONFIG[level] || CARE_LEVEL_CONFIG.SELF_CARE;
   const cfg = CARE_LEVEL_CONFIG[level] || CARE_LEVEL_CONFIG.SELF_CARE;
@@ -447,7 +619,7 @@ function StepResult({ result, demographicData, symptomsData, onPreRegister, onRe
       )}
 
       <div className="sc-result-actions">
-        <ActionButtons cta={cfg.cta} careLevel={level} onPreRegister={onPreRegister} />
+        <ActionButtons cta={cfg.cta} careLevel={level} onPreRegister={onPreRegister} onSchedule={onSchedule} />
         <button className="sc-action-btn ghost" onClick={onRestart}>
           ↩ Start Over
         </button>
@@ -581,13 +753,14 @@ function ProgressBar({ step, total }) {
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function SymptomCheck() {
-  const [step, setStep] = useState(0); // 0=welcome, 1=demo, 2=symptoms, 3=qa, 4=result, 5=preregister
+  const [step, setStep] = useState(0); // 0=welcome, 1=demo, 2=symptoms, 3=qa, 4=result, 5=preregister, 6=schedule
   const [demographics, setDemographics] = useState({
     age: 0, sex: "", language: "English", riskFactors: [],
   });
   const [symptomsData, setSymptomsData] = useState({ symptoms: "" });
   const [qaData, setQaData] = useState({ questions: [], answers: {}, preliminary: "" });
   const [result, setResult] = useState(null);
+  const [schedCareType, setSchedCareType] = useState("primary_care");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -638,6 +811,11 @@ export default function SymptomCheck() {
 
   const handleAnswer = (id, val) => {
     setQaData(d => ({ ...d, answers: { ...d.answers, [id]: val } }));
+  };
+
+  const handleSchedule = (careType) => {
+    setSchedCareType(careType);
+    setStep(6);
   };
 
   const restart = () => {
@@ -759,6 +937,7 @@ export default function SymptomCheck() {
               demographicData={demographics}
               symptomsData={symptomsData}
               onPreRegister={() => setStep(5)}
+              onSchedule={handleSchedule}
               onRestart={restart}
             />
           )}
@@ -769,6 +948,16 @@ export default function SymptomCheck() {
               symptomsData={symptomsData}
               result={result}
               onDone={() => setStep(4)}
+            />
+          )}
+
+          {step === 6 && (
+            <StepSchedule
+              careType={schedCareType}
+              demographicData={demographics}
+              symptomsData={symptomsData}
+              onDone={() => setStep(4)}
+              onSkip={() => setStep(4)}
             />
           )}
 
