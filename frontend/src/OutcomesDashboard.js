@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   AreaChart, Area, BarChart, Bar, LineChart, Line,
-  PieChart, Pie, Cell, RadarChart, Radar, PolarGrid, PolarAngleAxis,
+  PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from "recharts";
 import { API_BASE } from "./AuthContext";
@@ -14,7 +14,6 @@ const CARE_COLORS = {
 };
 
 const fmt = (n) => n?.toLocaleString() ?? "—";
-const pct = (n) => `${n}%`;
 
 // ── Custom tooltip ────────────────────────────────────────────────────────────
 function DarkTooltip({ active, payload, label }) {
@@ -32,8 +31,7 @@ function DarkTooltip({ active, payload, label }) {
 }
 
 // ── KPI card ──────────────────────────────────────────────────────────────────
-function KPICard({ label, value, unit = "", sub, color = "#0d9488", trend, benchmark }) {
-  const improved = trend === "up" ? "↑" : trend === "down" ? "↓" : null;
+function KPICard({ label, value, unit = "", sub, color = "#0d9488", benchmark }) {
   return (
     <div className="kpi-card">
       <div className="kpi-value" style={{ color }}>{value}<span className="kpi-unit">{unit}</span></div>
@@ -148,7 +146,6 @@ function SepsisComponents({ components }) {
 export default function OutcomesDashboard({ user }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [range, setRange] = useState("24h");
   const [lastRefresh, setLastRefresh] = useState(null);
 
   const fetchData = useCallback(async () => {
@@ -182,10 +179,8 @@ export default function OutcomesDashboard({ user }) {
   }
   if (!data) return <div className="dash-loading">No data available.</div>;
 
-  const { queue: q, capacity: cap, performance: perf, timeseries, trends_7d,
+  const { queue: q, performance: perf, timeseries, trends_7d,
           esi_trends, journeys, diversion, sepsis, benchmarks, totals, alerts } = data;
-
-  const capColor = cap.status === "critical" ? "#dc2626" : cap.status === "high" ? "#ea580c" : cap.status === "moderate" ? "#ca8a04" : "#22c55e";
 
   return (
     <div className="outcomes-dashboard">

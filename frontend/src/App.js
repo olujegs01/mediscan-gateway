@@ -370,7 +370,7 @@ function DemoPlayer({ onClose }) {
   const [zoneStatus, setZoneStatus] = useState({ 1: "idle", 2: "idle", 3: "idle", 4: "idle", 5: "idle" });
   const [sensorData, setSensorData] = useState(null);
   const [triageData, setTriageData] = useState(null);
-  const [zone5Data, setZone5Data] = useState(null);
+  const [zone5Data, setZone5Data] = useState(null); // eslint-disable-line no-unused-vars
   const [logs, setLogs] = useState([]);
   const [scanComplete, setScanComplete] = useState(false);
   const [demoIndex, setDemoIndex] = useState(0);
@@ -868,7 +868,7 @@ export default function App() {
     setSoapLoading(true);
     try {
       const res = await fetch(`${API_BASE}/chart/note/${patient.patient_id}/generate`, {
-        method: "POST", headers: authHeaders(),
+        method: "POST", headers: { Authorization: `Bearer ${user?.token}` },
       });
       const note = await res.json();
       setSoapModal({ patientId: patient.patient_id, patientName: patient.name, note });

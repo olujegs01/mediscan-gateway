@@ -92,11 +92,9 @@ export default function LobbyDisplay() {
     alerts: [],
   });
   const [ticker, setTicker] = useState([]);
-  const [wsOk, setWsOk] = useState(false);
-
   const fetchStats = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/analytics`, {
+      await fetch(`${API_BASE}/analytics`, {
         headers: { Authorization: "Bearer lobby-public" },
       }).catch(() => null);
       // analytics requires auth — we'll just use WS data + a public endpoint if added
@@ -104,7 +102,6 @@ export default function LobbyDisplay() {
   }, []);
 
   const handleWsMsg = useCallback((msg) => {
-    setWsOk(true);
     if (msg.event === "patient_added") {
       setTicker(prev => [
         ...prev,
