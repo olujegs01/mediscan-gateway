@@ -19,10 +19,13 @@ from database import init_db, get_db
 from patient_store import (
     upsert_patient, load_active_patients, discharge_patient_db,
     clear_all_active, get_audit_logs, save_shift_report, get_shift_reports, write_audit,
+    get_beds, update_bed, get_bed_summary,
 )
 from audit import AuditMiddleware
 from pdf_report import generate_shift_pdf
+from demo_data import get_demo_patient
 from sqlalchemy.orm import Session
+from pydantic import BaseModel as PydanticBase
 
 app = FastAPI(title="MediScan Gateway API", version="2.0")
 
@@ -38,13 +41,17 @@ app.add_middleware(AuditMiddleware)
 @app.on_event("startup")
 def startup():
     init_db()
-    # Warm in-memory cache from DB on restart
     db = next(get_db())
     try:
+        from database import seed_beds
+        seed_beds(db)
         for p in load_active_patients(db):
             er_queue.append(p)
     finally:
         db.close()
+
+
+_demo_counter = 0
 
 
 er_queue: List[dict] = []
@@ -104,7 +111,7 @@ def health():
 # ── Analytics Dashboard ───────────────────────────────────────────────────────
 
 @app.get("/analytics")
-def get_analytics(_: dict = Depends(verify_token)):
+def get_analytics(_: dict = Depends(verify_token), db: Session = Depends(get_db)):
     import random
 
     total = len(er_queue)
@@ -119,10 +126,10 @@ def get_analytics(_: dict = Depends(verify_token)):
         waits = [p.get("wait_time_estimate", 0) for p in er_queue]
         avg_wait = int(sum(waits) / len(waits))
 
-    total_beds = 42
-    occupied_beds = min(total_beds, total + random.randint(8, 18))
-    boarding_patients = random.randint(0, max(0, occupied_beds - 30))
-    occupancy_pct = round((occupied_beds / total_beds) * 100, 1)
+    # Real bed data from DB
+    beds = get_bed_summary(db)
+    occupancy_pct = beds["occupancy_percent"]
+    boarding_patients = beds["boarding_patients"]
 
     return {
         "timestamp": datetime.utcnow().isoformat(),
@@ -136,8 +143,9 @@ def get_analytics(_: dict = Depends(verify_token)):
             "lwbs_high_risk": lwbs_high_risk,
         },
         "capacity": {
-            "total_beds": total_beds,
-            "occupied_beds": occupied_beds,
+            "total_beds": beds["total_beds"],
+            "occupied_beds": beds["occupied_beds"],
+            "available_beds": beds["available_beds"],
             "boarding_patients": boarding_patients,
             "occupancy_percent": occupancy_pct,
             "status": "critical" if occupancy_pct >= 90 else ("high" if occupancy_pct >= 75 else ("moderate" if occupancy_pct >= 50 else "normal")),
@@ -186,6 +194,164 @@ def get_audit(
     db: Session = Depends(get_db),
 ):
     return get_audit_logs(db, limit=limit)
+
+
+# ── Bed Board ─────────────────────────────────────────────────────────────────
+
+class BedUpdateRequest(PydanticBase):
+    status: str          # available | occupied | boarding | cleaning
+    patient_id: str = None
+
+
+@app.get("/beds")
+def list_beds(_: dict = Depends(verify_token), db: Session = Depends(get_db)):
+    return get_beds(db)
+
+
+@app.put("/beds/{room:path}")
+def update_bed_status(
+    room: str,
+    body: BedUpdateRequest,
+    token: dict = Depends(require_role("admin", "nurse", "physician")),
+    db: Session = Depends(get_db),
+):
+    valid = {"available", "occupied", "boarding", "cleaning"}
+    if body.status not in valid:
+        raise HTTPException(status_code=400, detail=f"status must be one of {valid}")
+    result = update_bed(db, room, body.status, body.patient_id, updated_by=token["sub"])
+    if not result:
+        raise HTTPException(status_code=404, detail="Bed not found")
+    write_audit(db, token["sub"], token["role"], "update_bed",
+                details={"room": room, "status": body.status})
+    return result
+
+
+# ── Demo / Kiosk Stream (no auth — public) ────────────────────────────────────
+
+@app.get("/demo/stream")
+async def demo_stream(index: int = Query(default=0)):
+    """Public SSE endpoint for investor/kiosk demo — no auth required, no real patient data."""
+    global _demo_counter
+
+    async def event_generator():
+        def sse(event_type: str, payload: dict) -> str:
+            return f"data: {json.dumps({'event': event_type, **payload})}\n\n"
+
+        patient = get_demo_patient(index)
+
+        yield sse("zone1_start", {"zone": 1, "message": "Patient entering sensor portal..."})
+        await asyncio.sleep(0.6)
+        yield sse("zone1_complete", {
+            "zone": 1,
+            "message": "Zone 1 complete — all sensors fired",
+            "data": {
+                "heart_rate": patient["sensors"]["heart_rate"],
+                "respiratory_rate": patient["sensors"]["respiratory_rate"],
+                "skin_temp": patient["sensors"]["skin_temp"],
+                "fever_flag": patient["sensors"]["fever_flag"],
+                "gait_symmetry": patient["sensors"]["gait_symmetry"],
+                "posture_score": patient["sensors"]["posture_score"],
+                "inflammation_zones": [],
+                "limb_asymmetry": None,
+                "injury_indicators": [],
+                "bone_density_flag": False,
+                "dense_tissue_alerts": [],
+                "gait_speed": 1.1,
+            },
+        })
+        await asyncio.sleep(0.4)
+
+        yield sse("zone2_start", {"zone": 2, "message": "Running biometric identification..."})
+        await asyncio.sleep(0.5)
+        yield sse("zone2_biometric", {
+            "zone": 2,
+            "message": f"Face match: {patient['face_confidence']:.1f}% confidence",
+            "data": {"patient_id": patient["patient_id"], "name": patient["name"], "age": patient["age"], "face_match_confidence": patient["face_confidence"] / 100},
+        })
+        await asyncio.sleep(0.3)
+        yield sse("zone2_ehr", {
+            "zone": 2, "message": "EHR pulled from Epic/Cerner",
+            "data": {"patient_id": patient["patient_id"]},
+        })
+        await asyncio.sleep(0.3)
+        yield sse("zone2_insurance", {
+            "zone": 2, "message": f"Insurance verified — {patient['insurance']}",
+            "data": {"provider": patient["insurance"].split(" — ")[0]},
+        })
+        await asyncio.sleep(0.4)
+
+        yield sse("zone3_start", {"zone": 3, "message": "AI diagnostic engine running sensor fusion..."})
+        await asyncio.sleep(0.3)
+        yield sse("zone3_llm", {"zone": 3, "message": "Claude triage engine analyzing clinical data..."})
+        await asyncio.sleep(1.0)
+        yield sse("zone3_complete", {
+            "zone": 3,
+            "message": f"ESI {patient['esi_level']} assigned — {patient['priority_label']}",
+            "data": {
+                "esi_level": patient["esi_level"],
+                "priority_label": patient["priority_label"],
+                "risk_flags": patient["risk_flags"],
+                "ai_summary": patient["ai_summary"],
+                "routing_destination": patient["routing_destination"],
+                "room_assignment": patient["room_assignment"],
+                "wait_time_minutes": patient["wait_time_minutes"],
+                "care_pre_staged": patient["care_pre_staged"],
+                "sepsis_probability": patient["sepsis_probability"],
+                "qsofa_score": patient["qsofa_score"],
+                "admission_probability": patient["admission_probability"],
+                "disposition_prediction": patient["disposition_prediction"],
+                "behavioral_health_flag": "behavioral" in patient["chief_complaint"],
+                "lwbs_risk": "low" if patient["esi_level"] <= 2 else ("moderate" if patient["esi_level"] == 3 else "high"),
+                "deterioration_risk": "high" if patient["esi_level"] <= 2 else "stable",
+                "vertical_flow_eligible": patient["esi_level"] >= 3,
+                "fast_track_eligible": patient["esi_level"] == 3,
+                "differential_diagnoses": [],
+                "time_sensitive_interventions": patient["care_pre_staged"][:2],
+            },
+        })
+        await asyncio.sleep(0.3)
+
+        yield sse("zone4_routing", {
+            "zone": 4,
+            "message": f"Routing to {patient['routing_destination']} — {patient['room_assignment']}",
+            "data": {"esi_level": patient["esi_level"], "destination": patient["routing_destination"], "room": patient["room_assignment"]},
+        })
+        await asyncio.sleep(0.3)
+
+        yield sse("zone5_complete", {
+            "zone": 5, "message": "Zone 5 complete — patient fully processed",
+            "data": {
+                "wristband": {"nfc_id": f"NFC-{patient['patient_id']}-DEMO"},
+                "phone_push": {"sent": True, "sms_sent": False, "message": f"{patient['name']} — Room: {patient['room_assignment']}"},
+                "family_alert": {"sent": patient["esi_level"] <= 3},
+                "care_orders": {"orders_placed": True, "order_count": len(patient["care_pre_staged"]), "orders": patient["care_pre_staged"]},
+            },
+        })
+
+        yield sse("scan_complete", {
+            "zone": 0, "message": "Scan complete — patient checked in",
+            "data": {
+                "patient_id": patient["patient_id"],
+                "name": patient["name"],
+                "age": patient["age"],
+                "chief_complaint": patient["chief_complaint"],
+                "esi_level": patient["esi_level"],
+                "priority": patient["priority_label"],
+                "room_assignment": patient["room_assignment"],
+                "wait_time_estimate": patient["wait_time_minutes"],
+                "ai_summary": patient["ai_summary"],
+                "risk_flags": patient["risk_flags"],
+            },
+        })
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.get("/demo/patients")
+def demo_patient_list():
+    """Returns count of available demo patients for the kiosk loop."""
+    from demo_data import DEMO_PATIENTS
+    return {"count": len(DEMO_PATIENTS)}
 
 
 # ── Shift Report ──────────────────────────────────────────────────────────────

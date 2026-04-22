@@ -397,6 +397,263 @@ function AnalyticsDashboard({ user }) {
   );
 }
 
+// ── Bed Board ─────────────────────────────────────────────────────────────────
+
+const BED_STATUS_CONFIG = {
+  available: { color: "#22c55e", bg: "#052e16", label: "Available" },
+  occupied:  { color: "#f97316", bg: "#431407", label: "Occupied" },
+  boarding:  { color: "#dc2626", bg: "#450a0a", label: "Boarding" },
+  cleaning:  { color: "#94a3b8", bg: "#1e293b", label: "Cleaning" },
+};
+
+const STATUS_CYCLE = ["available", "occupied", "boarding", "cleaning"];
+
+function BedBoard({ user }) {
+  const [beds, setBeds] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [updating, setUpdating] = useState(null);
+
+  const fetchBeds = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/beds`, {
+        headers: { Authorization: `Bearer ${user?.token}` },
+      });
+      setBeds(await res.json());
+    } catch (e) {
+      console.error("Beds fetch error:", e);
+    } finally {
+      setLoading(false);
+    }
+  }, [user?.token]);
+
+  useEffect(() => { fetchBeds(); const t = setInterval(fetchBeds, 20000); return () => clearInterval(t); }, [fetchBeds]);
+
+  const cycleStatus = async (bed) => {
+    const next = STATUS_CYCLE[(STATUS_CYCLE.indexOf(bed.status) + 1) % STATUS_CYCLE.length];
+    setUpdating(bed.room);
+    try {
+      const res = await fetch(`${API_BASE}/beds/${encodeURIComponent(bed.room)}`, {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${user?.token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ status: next, patient_id: next === "available" ? null : bed.patient_id }),
+      });
+      const updated = await res.json();
+      setBeds(prev => prev.map(b => b.room === bed.room ? updated : b));
+    } catch (e) {
+      console.error("Bed update error:", e);
+    } finally {
+      setUpdating(null);
+    }
+  };
+
+  const units = [...new Set(beds.map(b => b.unit))];
+  const summary = {
+    available: beds.filter(b => b.status === "available").length,
+    occupied: beds.filter(b => b.status === "occupied").length,
+    boarding: beds.filter(b => b.status === "boarding").length,
+    cleaning: beds.filter(b => b.status === "cleaning").length,
+  };
+
+  if (loading) return <div className="analytics-loading">Loading bed board...</div>;
+
+  return (
+    <div className="bedboard-layout">
+      <div className="bedboard-header">
+        <div>
+          <h2>Live Bed Board</h2>
+          <p style={{ color: "#94a3b8", marginTop: 4 }}>Click any bed to cycle its status</p>
+        </div>
+        <div className="bed-summary-pills">
+          {Object.entries(summary).map(([status, count]) => (
+            <div key={status} className="bed-summary-pill" style={{ color: BED_STATUS_CONFIG[status].color, borderColor: BED_STATUS_CONFIG[status].color }}>
+              <span style={{ fontWeight: 700, fontSize: 18 }}>{count}</span>
+              <span style={{ fontSize: 11 }}>{BED_STATUS_CONFIG[status].label}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {units.map(unit => (
+        <div key={unit} className="bed-unit">
+          <div className="bed-unit-title">{unit}</div>
+          <div className="bed-grid">
+            {beds.filter(b => b.unit === unit).map(bed => {
+              const cfg = BED_STATUS_CONFIG[bed.status] || BED_STATUS_CONFIG.available;
+              return (
+                <button
+                  key={bed.room}
+                  className={`bed-cell ${updating === bed.room ? "bed-updating" : ""}`}
+                  style={{ borderColor: cfg.color, background: cfg.bg, color: cfg.color }}
+                  onClick={() => cycleStatus(bed)}
+                  title={`${bed.room} — click to change status`}
+                >
+                  <div className="bed-room">{bed.room}</div>
+                  <div className="bed-status-label">{updating === bed.room ? "…" : cfg.label}</div>
+                  {bed.patient_id && bed.status !== "available" && (
+                    <div className="bed-patient-id">{bed.patient_id.slice(0, 8)}</div>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+
+      <div style={{ marginTop: 16, fontSize: 12, color: "#475569" }}>
+        Occupancy: {beds.length > 0 ? Math.round(((summary.occupied + summary.boarding) / beds.length) * 100) : 0}% — {beds.length} total beds
+      </div>
+    </div>
+  );
+}
+
+// ── Demo / Kiosk Mode ─────────────────────────────────────────────────────────
+
+function DemoPlayer({ onClose }) {
+  const [scanning, setScanning] = useState(false);
+  const [zoneStatus, setZoneStatus] = useState({ 1: "idle", 2: "idle", 3: "idle", 4: "idle", 5: "idle" });
+  const [sensorData, setSensorData] = useState(null);
+  const [triageData, setTriageData] = useState(null);
+  const [zone5Data, setZone5Data] = useState(null);
+  const [logs, setLogs] = useState([]);
+  const [scanComplete, setScanComplete] = useState(false);
+  const [demoIndex, setDemoIndex] = useState(0);
+  const [demoCount] = useState(4);
+  const evtRef = useRef(null);
+
+  const DEMO_NAMES = ["James Okonkwo, 58", "Maria Santos, 34", "Derek Williams, 72", "Aisha Patel, 26"];
+
+  const addLog = (zone, message) => {
+    const time = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    setLogs(prev => [...prev, { zone, message, time }]);
+  };
+
+  const runDemo = (idx) => {
+    if (evtRef.current) evtRef.current.close();
+    setZoneStatus({ 1: "idle", 2: "idle", 3: "idle", 4: "idle", 5: "idle" });
+    setSensorData(null); setTriageData(null); setZone5Data(null);
+    setScanComplete(false); setLogs([]);
+    setScanning(true);
+
+    const evtSource = new EventSource(`${API_BASE}/demo/stream?index=${idx}`);
+    evtRef.current = evtSource;
+
+    evtSource.onmessage = (e) => {
+      const payload = JSON.parse(e.data);
+      const { event, zone, message, data } = payload;
+      addLog(zone, message);
+      switch (event) {
+        case "zone1_start": setZoneStatus(s => ({ ...s, 1: "active" })); break;
+        case "zone1_complete": setZoneStatus(s => ({ ...s, 1: "done" })); setSensorData(data); break;
+        case "zone2_start": setZoneStatus(s => ({ ...s, 2: "active" })); break;
+        case "zone2_insurance": setZoneStatus(s => ({ ...s, 2: "done" })); break;
+        case "zone3_start": case "zone3_llm": setZoneStatus(s => ({ ...s, 3: "active" })); break;
+        case "zone3_complete": setZoneStatus(s => ({ ...s, 3: "done" })); setTriageData(data); break;
+        case "zone4_routing": setZoneStatus(s => ({ ...s, 4: "done" })); break;
+        case "zone5_complete": setZoneStatus(s => ({ ...s, 5: "done" })); setZone5Data(data); break;
+        case "scan_complete":
+          setScanComplete(true); setScanning(false); evtSource.close();
+          setTimeout(() => { const next = (idx + 1) % demoCount; setDemoIndex(next); runDemo(next); }, 6000);
+          break;
+        default: break;
+      }
+    };
+    evtSource.onerror = () => { setScanning(false); evtSource.close(); };
+  };
+
+  useEffect(() => { runDemo(demoIndex); return () => evtRef.current?.close(); }, []); // eslint-disable-line
+
+  const cfg = triageData ? ESI_CONFIG[triageData.esi_level] : null;
+
+  return (
+    <div className="demo-overlay">
+      <div className="demo-panel">
+        <div className="demo-header">
+          <div>
+            <div className="demo-title">⚕ MediScan Gateway — Live Demo</div>
+            <div className="demo-sub">AI-Powered Walk-Through Patient Intake · Auto-cycling {demoCount} patients</div>
+          </div>
+          <button className="demo-close" onClick={onClose}>✕ Exit Demo</button>
+        </div>
+
+        <div className="demo-body">
+          {/* Portal animation */}
+          <div className="demo-portal-col">
+            <SensorPortal active={scanning} />
+            <div className="demo-patient-label">{DEMO_NAMES[demoIndex]}</div>
+
+            {/* Zone steps */}
+            {[1, 2, 3, 4, 5].map(z => (
+              <ZoneStep key={z} zoneNum={z} label={ZONE_LABELS[z]} status={zoneStatus[z]} />
+            ))}
+          </div>
+
+          {/* Result */}
+          <div className="demo-result-col">
+            {triageData && cfg && (
+              <div className="complete-banner" style={{ borderColor: cfg.color, background: cfg.bg }}>
+                <div className="complete-icon">{cfg.icon}</div>
+                <div>
+                  <div className="complete-title" style={{ color: cfg.color }}>{triageData.priority_label} — ESI {triageData.esi_level}</div>
+                  <div className="complete-sub">Room: {triageData.room_assignment} · Wait: {triageData.wait_time_minutes} min</div>
+                </div>
+              </div>
+            )}
+
+            {triageData && (
+              <div className="card" style={{ marginTop: 12 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0", marginBottom: 8 }}>AI Clinical Summary</div>
+                <div style={{ fontSize: 13, color: "#94a3b8", lineHeight: 1.6 }}>{triageData.ai_summary}</div>
+                {triageData.risk_flags?.length > 0 && (
+                  <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 6 }}>
+                    {triageData.risk_flags.map((f, i) => (
+                      <span key={i} style={{ fontSize: 11, padding: "3px 8px", borderRadius: 10, background: "#1e293b", color: "#f87171", border: "1px solid #dc2626" }}>{f}</span>
+                    ))}
+                  </div>
+                )}
+                <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                  <div className="metric-card" style={{ padding: 10 }}>
+                    <div className="metric-val" style={{ fontSize: 18 }}>{triageData.admission_probability}%</div>
+                    <div className="metric-label">Admission Risk</div>
+                  </div>
+                  <div className="metric-card" style={{ padding: 10 }}>
+                    <div className="metric-val" style={{ fontSize: 18, color: triageData.sepsis_probability === "high" ? "#dc2626" : "#22c55e" }}>{triageData.sepsis_probability}</div>
+                    <div className="metric-label">Sepsis Probability</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {sensorData && !triageData && (
+              <SensorCard data={sensorData} />
+            )}
+
+            {scanComplete && (
+              <div style={{ textAlign: "center", padding: "16px 0", color: "#94a3b8", fontSize: 13 }}>
+                Next patient in 6 seconds...
+              </div>
+            )}
+
+            <div className="demo-log">
+              {logs.slice(-8).map((l, i) => (
+                <div key={i} style={{ fontSize: 11, color: "#64748b", padding: "2px 0" }}>
+                  <span style={{ color: "#475569" }}>{l.time}</span> · {l.message}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="demo-footer">
+          <span style={{ color: "#94a3b8" }}>Door-to-triage: <b style={{ color: "#22c55e" }}>&lt;15 seconds</b></span>
+          <span style={{ color: "#94a3b8" }}>National avg: <b style={{ color: "#f87171" }}>28 minutes</b></span>
+          <span style={{ color: "#94a3b8" }}>LWBS reduction: <b style={{ color: "#22c55e" }}>60%</b></span>
+          <span style={{ color: "#94a3b8" }}>LOS reduction: <b style={{ color: "#22c55e" }}>30%</b></span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AuditLogPanel({ user }) {
   const [logs, setAuditLogs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -605,6 +862,7 @@ const COMPLAINT_CATEGORIES = {
 
 export default function App() {
   const { user, logout } = useAuth();
+  const [showDemo, setShowDemo] = useState(false);
   const [form, setForm] = useState({ name: "", age: "", phone: "" });
   const [selectedComplaints, setSelectedComplaints] = useState([]);
   const [customComplaint, setCustomComplaint] = useState("");
@@ -774,6 +1032,7 @@ export default function App() {
 
   return (
     <div className="app">
+      {showDemo && <DemoPlayer onClose={() => setShowDemo(false)} />}
       {/* Header */}
       <header className="app-header">
         <div className="header-inner">
@@ -789,6 +1048,7 @@ export default function App() {
             <div className="stat-pill urgent">{queue.filter(p => p.esi_level <= 2).length} High Acuity</div>
             <div className="stat-pill total">{queue.length} In Queue</div>
             <div className="header-user">
+              <button className="demo-btn" onClick={() => setShowDemo(true)}>▶ Demo</button>
               <span className="user-name">{user?.name}</span>
               <span className="user-role">{user?.role}</span>
               <button className="logout-btn" onClick={logout}>Sign Out</button>
@@ -806,6 +1066,9 @@ export default function App() {
         </button>
         <button className={`tab ${activeTab === "analytics" ? "active" : ""}`} onClick={() => setActiveTab("analytics")}>
           📊 Command Dashboard
+        </button>
+        <button className={`tab ${activeTab === "beds" ? "active" : ""}`} onClick={() => setActiveTab("beds")}>
+          🛏 Bed Board
         </button>
         {(user?.role === "admin" || user?.role === "nurse" || user?.role === "physician") && (
           <button className={`tab ${activeTab === "report" ? "active" : ""}`} onClick={() => setActiveTab("report")}>
@@ -1067,6 +1330,7 @@ export default function App() {
         )}
 
         {activeTab === "analytics" && <AnalyticsDashboard user={user} />}
+        {activeTab === "beds" && <BedBoard user={user} />}
         {activeTab === "report" && <ShiftReportPanel user={user} />}
         {activeTab === "audit" && <AuditLogPanel user={user} />}
       </main>

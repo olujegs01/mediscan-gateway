@@ -164,6 +164,57 @@ def save_shift_report(db: Session, report: dict) -> ShiftReport:
     return row
 
 
+def get_beds(db: Session) -> List[dict]:
+    from database import Bed
+    rows = db.query(Bed).order_by(Bed.unit, Bed.room).all()
+    return [_bed_to_dict(r) for r in rows]
+
+
+def update_bed(db: Session, room: str, status: str, patient_id: str = None, updated_by: str = None) -> dict | None:
+    from database import Bed
+    from datetime import datetime
+    row = db.query(Bed).filter_by(room=room).first()
+    if not row:
+        return None
+    row.status = status
+    row.patient_id = patient_id
+    row.updated_at = datetime.utcnow()
+    row.updated_by = updated_by
+    db.commit()
+    db.refresh(row)
+    return _bed_to_dict(row)
+
+
+def _bed_to_dict(r) -> dict:
+    return {
+        "id": r.id,
+        "unit": r.unit,
+        "room": r.room,
+        "status": r.status,
+        "patient_id": r.patient_id,
+        "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+        "updated_by": r.updated_by,
+    }
+
+
+def get_bed_summary(db: Session) -> dict:
+    from database import Bed
+    beds = db.query(Bed).all()
+    total = len(beds)
+    occupied = sum(1 for b in beds if b.status == "occupied")
+    boarding = sum(1 for b in beds if b.status == "boarding")
+    available = sum(1 for b in beds if b.status == "available")
+    cleaning = sum(1 for b in beds if b.status == "cleaning")
+    return {
+        "total_beds": total,
+        "occupied_beds": occupied + boarding,
+        "available_beds": available,
+        "boarding_patients": boarding,
+        "cleaning_beds": cleaning,
+        "occupancy_percent": round((occupied + boarding) / total * 100, 1) if total else 0,
+    }
+
+
 def get_shift_reports(db: Session, limit: int = 20) -> List[dict]:
     rows = (
         db.query(ShiftReport)

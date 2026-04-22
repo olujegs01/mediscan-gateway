@@ -82,6 +82,43 @@ class ShiftReport(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class Bed(Base):
+    __tablename__ = "beds"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    unit = Column(String)           # Trauma Bay | Resuscitation | ED Main | Fast Track
+    room = Column(String, unique=True)
+    status = Column(String, default="available")  # available | occupied | boarding | cleaning
+    patient_id = Column(String, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_by = Column(String, nullable=True)
+
+
+# Seed 42 beds on first run
+_BED_LAYOUT = [
+    # unit,             room,        count, prefix
+    ("Trauma Bay",      "Trauma",    4,     "T"),
+    ("Resuscitation",   "Resus",     4,     "R"),
+    ("ED Main",         "Room",      24,    ""),
+    ("Fast Track",      "FT",        6,     "FT-"),
+    ("Behavioral Health","BH-Suite", 4,     "BH-"),
+]
+
+
+def seed_beds(db):
+    from sqlalchemy import func
+    count = db.query(func.count(Bed.id)).scalar()
+    if count > 0:
+        return
+    beds = []
+    for unit, room_base, total, prefix in _BED_LAYOUT:
+        for i in range(1, total + 1):
+            room_name = f"{room_base} {i}" if not prefix else f"{prefix}{i}"
+            beds.append(Bed(id=str(uuid.uuid4()), unit=unit, room=room_name))
+    db.add_all(beds)
+    db.commit()
+
+
 def init_db():
     Base.metadata.create_all(bind=engine)
 
