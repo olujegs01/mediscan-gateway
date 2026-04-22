@@ -32,6 +32,7 @@ from monitor import monitoring_loop
 from fhir_client import search_patient, get_conditions, get_medications, fhir_available
 from sqlalchemy.orm import Session
 from pydantic import BaseModel as PydanticBase
+from symptom_check import run_assessment, CARE_LEVELS
 
 app = FastAPI(title="MediScan Gateway API", version="2.0")
 
@@ -262,6 +263,116 @@ def get_audit(
 class BedUpdateRequest(PydanticBase):
     status: str          # available | occupied | boarding | cleaning
     patient_id: str = None
+
+
+# ── CareNavigator — Pre-Arrival Symptom Check (public) ────────────────────────
+
+class CheckAssessRequest(PydanticBase):
+    age: int
+    sex: str
+    symptoms: str
+    risk_factors: list = []
+    qa_history: list = []
+    language: str = "English"
+
+
+class PreRegisterRequest(PydanticBase):
+    name: str
+    age: int
+    sex: str
+    phone: str = ""
+    symptoms: str
+    care_level: str
+    reasoning: str = ""
+    ed_ready_summary: str = ""
+
+
+@app.post("/check/assess")
+def check_assess(body: CheckAssessRequest):
+    """Public endpoint — AI symptom triage. No PHI stored. Returns care level recommendation."""
+    if not body.symptoms or len(body.symptoms.strip()) < 5:
+        raise HTTPException(status_code=400, detail="Please describe your symptoms")
+    if body.age < 0 or body.age > 120:
+        raise HTTPException(status_code=400, detail="Invalid age")
+    result = run_assessment(
+        age=body.age,
+        sex=body.sex,
+        symptoms=body.symptoms,
+        risk_factors=body.risk_factors,
+        qa_history=body.qa_history,
+        language=body.language,
+    )
+    return result
+
+
+@app.post("/check/pre-register")
+def check_pre_register(body: PreRegisterRequest, db: Session = Depends(get_db)):
+    """Pre-arrival ED registration — creates an 'incoming' entry visible to staff."""
+    import uuid
+
+    # Map care_level to ESI
+    level_to_esi = {
+        "CALL_911": 1, "ED_NOW": 1, "ED_SOON": 2,
+        "URGENT_CARE": 3, "TELEHEALTH": 4, "PRIMARY_CARE": 5, "SELF_CARE": 5,
+    }
+    esi = level_to_esi.get(body.care_level, 3)
+    patient_id = f"PRE-{uuid.uuid4().hex[:8].upper()}"
+
+    meta = CARE_LEVELS.get(body.care_level, CARE_LEVELS["SELF_CARE"])
+
+    record = {
+        "patient_id": patient_id,
+        "name": body.name,
+        "age": body.age,
+        "phone": body.phone,
+        "chief_complaint": body.symptoms[:200],
+        "esi_level": esi,
+        "priority": meta["label"],
+        "risk_flags": ["Pre-arrival registration"],
+        "ai_summary": body.ed_ready_summary or body.reasoning or f"Pre-arrival: {body.symptoms[:100]}",
+        "routing_destination": "Pre-Arrival",
+        "room_assignment": "Incoming",
+        "wristband_code": None,
+        "wait_time_estimate": 0,
+        "care_pre_staged": [],
+        "insurance": {},
+        "timestamp": datetime.utcnow().isoformat(),
+        "sensor_data": {},
+        "ehr_summary": {"history": [], "medications": [], "allergies": []},
+        "triage_detail": {
+            "qsofa_score": 0,
+            "sirs_criteria_met": 0,
+            "sepsis_probability": "unknown",
+            "sepsis_bundle_triggered": False,
+            "admission_probability": 0,
+            "lwbs_risk": "low",
+            "deterioration_risk": "unknown",
+            "vertical_flow_eligible": esi >= 3,
+            "fast_track_eligible": esi == 3,
+            "behavioral_health_flag": False,
+            "differential_diagnoses": [],
+            "time_sensitive_interventions": [],
+            "disposition_prediction": "pending",
+        },
+        "pre_arrival": True,
+    }
+
+    er_queue.append(record)
+    try:
+        upsert_patient(db, record)
+    except Exception as e:
+        print(f"Pre-register DB error: {e}")
+
+    asyncio.create_task(ws_manager.broadcast_all("patient_added", record))
+
+    return {
+        "success": True,
+        "patient_id": patient_id,
+        "message": "You are registered. Staff have been notified of your arrival.",
+        "care_level": body.care_level,
+        "care_label": meta["label"],
+        "esi_level": esi,
+    }
 
 
 @app.get("/beds")

@@ -1150,6 +1150,15 @@ export default function App() {
           <button className="demo-btn" style={{ width: "100%", fontSize: 12, padding: "8px" }} onClick={() => setShowDemo(true)}>
             ▶ Run Demo
           </button>
+          <a
+            href="/check"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="demo-btn"
+            style={{ display: "block", width: "100%", fontSize: 12, padding: "8px", textAlign: "center", textDecoration: "none", marginTop: 6, color: "#5eead4", borderColor: "#0d9488" }}
+          >
+            🩺 CareNavigator
+          </a>
           <div className="sidebar-user">
             <div className="sidebar-user-avatar">{user?.name?.[0] || "?"}</div>
             <div className="sidebar-user-info">

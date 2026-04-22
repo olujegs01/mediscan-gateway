@@ -4,6 +4,7 @@ import './index.css';
 import App from './App';
 import LoginPage from './LoginPage';
 import LobbyDisplay from './LobbyDisplay';
+import SymptomCheck from './SymptomCheck';
 import { AuthProvider, useAuth } from './AuthContext';
 import reportWebVitals from './reportWebVitals';
 
@@ -13,6 +14,11 @@ function Root() {
   // Public lobby display — no auth required
   if (window.location.pathname === '/lobby') {
     return <LobbyDisplay />;
+  }
+
+  // Public symptom checker / care navigator — no auth required
+  if (window.location.pathname === '/check') {
+    return <SymptomCheck />;
   }
 
   if (loading) {
