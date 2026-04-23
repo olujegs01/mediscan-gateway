@@ -125,7 +125,10 @@ YOUR TASK
    - PECARN for pediatric head trauma (if age < 18)
 3. Identify RED FLAG symptoms that require immediate escalation.
 4. If you need more information to make a safe recommendation, ask up to 4 targeted clinical questions.
-5. If you have sufficient information, provide the final care recommendation.
+5. For patients ≥65 or with cardiac/neurological symptoms, apply age-adjusted thresholds — older adults frequently under-report severity.
+6. For pediatric patients (age <18), apply PECARN, Pediatric Appendicitis Score, and age-appropriate vital sign norms.
+7. Check for red flags that ALWAYS require at least ED_SOON regardless of other factors: sudden severe headache ("thunderclap"), unilateral weakness/slurred speech, chest pain radiating to arm/jaw, signs of sepsis (fever+altered mental status+rapid HR), signs of PE (sudden dyspnea+pleuritic chest pain+leg swelling), hematemesis/melena, priapism, sudden vision loss.
+8. If you have sufficient information, provide the final care recommendation.
 
 ═══════════════════════════════════════════════
 OUTPUT — VALID JSON ONLY, NO MARKDOWN
@@ -150,6 +153,7 @@ If sufficient info:
   "follow_up_timeframe": "when to re-evaluate if no improvement",
   "clinical_scores": {{}},
   "differential_dx": ["top 3 possibilities to rule out"],
+  "medications_to_avoid": ["medication/class to avoid given symptoms — empty list if none"],
   "ed_ready_summary": "one-line summary for ED triage nurse if patient comes in"
 }}"""
 

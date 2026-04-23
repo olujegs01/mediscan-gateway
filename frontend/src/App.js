@@ -264,19 +264,21 @@ const BED_STATUS_CONFIG = {
   cleaning:  { color: "#94a3b8", bg: "#1e293b", label: "Cleaning" },
 };
 
-const STATUS_CYCLE = ["available", "occupied", "boarding", "cleaning"];
-
-function BedBoard({ user }) {
+function BedBoard({ user, addToast }) {
   const [beds, setBeds] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [updating, setUpdating] = useState(null);
+  const [selectedBed, setSelectedBed] = useState(null);
+  const [actionLoading, setActionLoading] = useState("");
+
+  const authH = useCallback(() => ({
+    Authorization: `Bearer ${user?.token}`,
+    "Content-Type": "application/json",
+  }), [user?.token]);
 
   const fetchBeds = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/beds`, {
-        headers: { Authorization: `Bearer ${user?.token}` },
-      });
-      setBeds(await res.json());
+      const res = await fetch(`${API_BASE}/beds`, { headers: { Authorization: `Bearer ${user?.token}` } });
+      if (res.ok) setBeds(await res.json());
     } catch (e) {
       console.error("Beds fetch error:", e);
     } finally {
@@ -284,48 +286,150 @@ function BedBoard({ user }) {
     }
   }, [user?.token]);
 
-  useEffect(() => { fetchBeds(); const t = setInterval(fetchBeds, 20000); return () => clearInterval(t); }, [fetchBeds]);
+  useEffect(() => {
+    fetchBeds();
+    const t = setInterval(fetchBeds, 20000);
+    return () => clearInterval(t);
+  }, [fetchBeds]);
 
-  const cycleStatus = async (bed) => {
-    const next = STATUS_CYCLE[(STATUS_CYCLE.indexOf(bed.status) + 1) % STATUS_CYCLE.length];
-    setUpdating(bed.room);
+  const updateBedStatus = useCallback(async (room, newStatus, patientId = null) => {
+    const res = await fetch(`${API_BASE}/beds/${encodeURIComponent(room)}`, {
+      method: "PUT",
+      headers: authH(),
+      body: JSON.stringify({ status: newStatus, patient_id: patientId }),
+    });
+    if (!res.ok) throw new Error(`Bed update failed: ${res.status}`);
+    return await res.json();
+  }, [authH]);
+
+  const handleAction = useCallback(async (action) => {
+    if (!selectedBed) return;
+    setActionLoading(action);
     try {
-      const res = await fetch(`${API_BASE}/beds/${encodeURIComponent(bed.room)}`, {
-        method: "PUT",
-        headers: { Authorization: `Bearer ${user?.token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ status: next, patient_id: next === "available" ? null : bed.patient_id }),
-      });
-      const updated = await res.json();
-      setBeds(prev => prev.map(b => b.room === bed.room ? updated : b));
+      if (action === "discharge") {
+        const res = await fetch(`${API_BASE}/queue/${selectedBed.patient_id}/discharge`, {
+          method: "DELETE",
+          headers: authH(),
+        });
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({}));
+          addToast({ level: "warning", text: `Discharge failed: ${e.detail || res.status}` });
+          setActionLoading("");
+          return;
+        }
+        await updateBedStatus(selectedBed.room, "cleaning", null);
+        addToast({ level: "info", text: `Patient discharged from ${selectedBed.room}. Bed queued for cleaning.` });
+      } else if (action === "cleaning") {
+        await updateBedStatus(selectedBed.room, "cleaning", selectedBed.patient_id);
+        addToast({ level: "info", text: `Cleaning requested for ${selectedBed.room}.` });
+      } else if (action === "available") {
+        await updateBedStatus(selectedBed.room, "available", null);
+        addToast({ level: "info", text: `${selectedBed.room} marked available.` });
+      } else if (action === "occupied") {
+        await updateBedStatus(selectedBed.room, "occupied", selectedBed.patient_id);
+        addToast({ level: "info", text: `${selectedBed.room} marked occupied.` });
+      } else if (action === "boarding") {
+        await updateBedStatus(selectedBed.room, "boarding", selectedBed.patient_id);
+        addToast({ level: "info", text: `${selectedBed.room} marked boarding.` });
+      }
+      setSelectedBed(null);
+      fetchBeds();
     } catch (e) {
-      console.error("Bed update error:", e);
+      addToast({ level: "warning", text: `Action failed: ${e.message}` });
     } finally {
-      setUpdating(null);
+      setActionLoading("");
     }
-  };
+  }, [selectedBed, authH, updateBedStatus, addToast, fetchBeds]);
 
   const units = [...new Set(beds.map(b => b.unit))];
   const summary = {
     available: beds.filter(b => b.status === "available").length,
-    occupied: beds.filter(b => b.status === "occupied").length,
-    boarding: beds.filter(b => b.status === "boarding").length,
-    cleaning: beds.filter(b => b.status === "cleaning").length,
+    occupied:  beds.filter(b => b.status === "occupied").length,
+    boarding:  beds.filter(b => b.status === "boarding").length,
+    cleaning:  beds.filter(b => b.status === "cleaning").length,
   };
 
-  if (loading) return <div className="analytics-loading">Loading bed board...</div>;
+  if (loading) return <div className="analytics-loading">Loading bed board…</div>;
 
   return (
     <div className="bedboard-layout">
+      {/* Action modal */}
+      {selectedBed && (
+        <div className="bed-modal-overlay" onClick={() => setSelectedBed(null)}>
+          <div className="bed-modal" onClick={e => e.stopPropagation()}>
+            <div className="bed-modal-header">
+              <div>
+                <div className="bed-modal-room">{selectedBed.room}</div>
+                <div className="bed-modal-unit">{selectedBed.unit}</div>
+              </div>
+              <button className="bed-modal-close" onClick={() => setSelectedBed(null)}>✕</button>
+            </div>
+            <div className="bed-modal-status" style={{ color: BED_STATUS_CONFIG[selectedBed.status]?.color }}>
+              ● {BED_STATUS_CONFIG[selectedBed.status]?.label}
+              {selectedBed.patient_id && <span className="bed-modal-pid"> · Patient: {selectedBed.patient_id.slice(0,12)}</span>}
+            </div>
+            <div className="bed-modal-actions">
+              {(selectedBed.status === "occupied" || selectedBed.status === "boarding") && selectedBed.patient_id && (
+                <button
+                  className="bed-action-btn danger"
+                  onClick={() => handleAction("discharge")}
+                  disabled={!!actionLoading}
+                >
+                  {actionLoading === "discharge" ? "Discharging…" : "🏠 Discharge Patient"}
+                </button>
+              )}
+              {selectedBed.status !== "cleaning" && (
+                <button
+                  className="bed-action-btn warning"
+                  onClick={() => handleAction("cleaning")}
+                  disabled={!!actionLoading}
+                >
+                  {actionLoading === "cleaning" ? "Requesting…" : "🧹 Request Cleaning"}
+                </button>
+              )}
+              {selectedBed.status === "cleaning" && (
+                <button
+                  className="bed-action-btn success"
+                  onClick={() => handleAction("available")}
+                  disabled={!!actionLoading}
+                >
+                  {actionLoading === "available" ? "Updating…" : "✓ Mark Clean / Available"}
+                </button>
+              )}
+              {selectedBed.status === "available" && (
+                <button
+                  className="bed-action-btn info"
+                  onClick={() => handleAction("occupied")}
+                  disabled={!!actionLoading}
+                >
+                  {actionLoading === "occupied" ? "Updating…" : "🛏 Mark Occupied"}
+                </button>
+              )}
+              {(selectedBed.status === "occupied") && (
+                <button
+                  className="bed-action-btn warning"
+                  onClick={() => handleAction("boarding")}
+                  disabled={!!actionLoading}
+                >
+                  {actionLoading === "boarding" ? "Updating…" : "⏳ Mark Boarding"}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="bedboard-header">
         <div>
           <h2>Live Bed Board</h2>
-          <p style={{ color: "#94a3b8", marginTop: 4 }}>Click any bed to cycle its status</p>
+          <p style={{ color: "#94a3b8", marginTop: 4 }}>Click any bed to manage it</p>
         </div>
         <div className="bed-summary-pills">
-          {Object.entries(summary).map(([status, count]) => (
-            <div key={status} className="bed-summary-pill" style={{ color: BED_STATUS_CONFIG[status].color, borderColor: BED_STATUS_CONFIG[status].color }}>
+          {Object.entries(summary).map(([st, count]) => (
+            <div key={st} className="bed-summary-pill"
+              style={{ color: BED_STATUS_CONFIG[st].color, borderColor: BED_STATUS_CONFIG[st].color }}>
               <span style={{ fontWeight: 700, fontSize: 18 }}>{count}</span>
-              <span style={{ fontSize: 11 }}>{BED_STATUS_CONFIG[status].label}</span>
+              <span style={{ fontSize: 11 }}>{BED_STATUS_CONFIG[st].label}</span>
             </div>
           ))}
         </div>
@@ -340,13 +444,13 @@ function BedBoard({ user }) {
               return (
                 <button
                   key={bed.room}
-                  className={`bed-cell ${updating === bed.room ? "bed-updating" : ""}`}
+                  className="bed-cell"
                   style={{ borderColor: cfg.color, background: cfg.bg, color: cfg.color }}
-                  onClick={() => cycleStatus(bed)}
-                  title={`${bed.room} — click to change status`}
+                  onClick={() => setSelectedBed(bed)}
+                  title={`${bed.room} — ${cfg.label}`}
                 >
                   <div className="bed-room">{bed.room}</div>
-                  <div className="bed-status-label">{updating === bed.room ? "…" : cfg.label}</div>
+                  <div className="bed-status-label">{cfg.label}</div>
                   {bed.patient_id && bed.status !== "available" && (
                     <div className="bed-patient-id">{bed.patient_id.slice(0, 8)}</div>
                   )}
@@ -358,7 +462,8 @@ function BedBoard({ user }) {
       ))}
 
       <div style={{ marginTop: 16, fontSize: 12, color: "#475569" }}>
-        Occupancy: {beds.length > 0 ? Math.round(((summary.occupied + summary.boarding) / beds.length) * 100) : 0}% — {beds.length} total beds
+        Occupancy: {beds.length > 0 ? Math.round(((summary.occupied + summary.boarding) / beds.length) * 100) : 0}%
+        · {beds.length} total beds · {summary.cleaning} awaiting cleaning
       </div>
     </div>
   );
@@ -947,10 +1052,23 @@ export default function App() {
     }
   }, [user?.token]);
 
-  const dischargePatient = async (patientId) => {
-    await fetch(`${API_BASE}/queue/${patientId}`, { method: "DELETE", headers: authHeaders() });
-    setTimeout(fetchQueue, 500);
-  };
+  const dischargePatient = useCallback(async (patientId) => {
+    try {
+      const res = await fetch(`${API_BASE}/queue/${patientId}/discharge`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${user?.token}` },
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        addToast({ level: "warning", text: `Discharge failed: ${err.detail || res.status}` });
+        return;
+      }
+      setQueue(prev => prev.filter(p => p.patient_id !== patientId));
+      addToast({ level: "info", text: "Patient discharged. Clinical Journey triggered if phone on file." });
+    } catch (e) {
+      addToast({ level: "warning", text: "Network error during discharge — please retry." });
+    }
+  }, [user?.token, addToast]);
 
   const generateSoap = useCallback(async (patient) => {
     setSoapModal({ patientId: patient.patient_id, patientName: patient.name, note: null });
@@ -1039,10 +1157,13 @@ export default function App() {
           setZone5Data(data);
           break;
         case "scan_complete":
-          setScanComplete(true);
-          setScanning(false);
-          fetchQueue();
-          evtSource.close();
+          setScanComplete(true); setScanning(false); evtSource.close();
+          if (data?.patient_id) {
+            fetch(`${API_BASE}/chart/note/${data.patient_id}/generate`, {
+              method: "POST",
+              headers: { Authorization: `Bearer ${user?.token}` },
+            }).catch(() => {});
+          }
           break;
         default:
           break;
@@ -1404,7 +1525,7 @@ export default function App() {
         )}
 
         {activeTab === "analytics" && <OutcomesDashboard user={user} />}
-        {activeTab === "beds" && <BedBoard user={user} />}
+        {activeTab === "beds" && <BedBoard user={user} addToast={addToast} />}
         {activeTab === "report"     && <ShiftReportPanel user={user} queue={queue} />}
         {activeTab === "billing"    && <BillingPage user={user} />}
         {activeTab === "audit"      && <AuditLogPanel user={user} />}

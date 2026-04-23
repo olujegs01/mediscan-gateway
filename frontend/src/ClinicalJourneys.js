@@ -17,7 +17,7 @@ const ACTION_LABELS = {
   activate_surge_protocol:"Surge Protocol",
 };
 
-function JourneyRow({ journey, onCheckin, onResolve }) {
+function JourneyRow({ journey, onCheckin, onResolve, checkinLoading, resolveLoading }) {
   const [expanded, setExpanded] = useState(false);
   const cfg = STATUS_CONFIG[journey.journey_status] || STATUS_CONFIG.active;
 
@@ -106,13 +106,21 @@ function JourneyRow({ journey, onCheckin, onResolve }) {
 
           <div className="journey-actions">
             {journey.journey_status !== "completed" && (
-              <button className="journey-btn primary" onClick={() => onCheckin(journey.journey_id)}>
-                📤 Send Check-in Now
+              <button
+                className="journey-btn primary"
+                onClick={() => onCheckin(journey.journey_id)}
+                disabled={checkinLoading}
+              >
+                {checkinLoading ? "Sending…" : "📤 Send Check-in Now"}
               </button>
             )}
             {journey.journey_status === "escalated" && (
-              <button className="journey-btn warning" onClick={() => onResolve(journey.journey_id)}>
-                ✓ Mark Resolved
+              <button
+                className="journey-btn warning"
+                onClick={() => onResolve(journey.journey_id)}
+                disabled={resolveLoading}
+              >
+                {resolveLoading ? "Resolving…" : "✓ Mark Resolved"}
               </button>
             )}
           </div>
@@ -283,17 +291,54 @@ export default function ClinicalJourneys({ activeTab }) {
 
   useEffect(() => { load(); }, [load]);
 
+  const [checkinLoading, setCheckinLoading] = useState(null);
+  const [resolveLoading, setResolveLoading] = useState(null);
+  const [toast, setToast] = useState(null);
+
+  const showToast = (msg, ok = true) => {
+    setToast({ msg, ok });
+    setTimeout(() => setToast(null), 4000);
+  };
+
   const handleCheckin = async (journeyId) => {
-    await fetch(`${API_BASE}/journeys/${journeyId}/checkin`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    load();
+    setCheckinLoading(journeyId);
+    try {
+      const res = await fetch(`${API_BASE}/journeys/${journeyId}/checkin`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (res.ok) {
+        showToast(data.sms_sent ? "SMS check-in sent to patient." : "Check-in logged (SMS not configured).", true);
+      } else {
+        showToast(data.detail || "Check-in failed.", false);
+      }
+      load();
+    } catch {
+      showToast("Network error — please retry.", false);
+    } finally {
+      setCheckinLoading(null);
+    }
   };
 
   const handleResolve = async (journeyId) => {
-    // Mark resolved by sending a PATCH — for now just reload
-    load();
+    setResolveLoading(journeyId);
+    try {
+      const res = await fetch(`${API_BASE}/journeys/${journeyId}/resolve`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        showToast("Journey resolved and marked completed.", true);
+      } else {
+        showToast("Failed to resolve journey.", false);
+      }
+      load();
+    } catch {
+      showToast("Network error — please retry.", false);
+    } finally {
+      setResolveLoading(null);
+    }
   };
 
   if (activeTab === "compliance") return <CompliancePage token={token} />;
@@ -309,6 +354,18 @@ export default function ClinicalJourneys({ activeTab }) {
 
   return (
     <div className="journeys-page">
+      {toast && (
+        <div style={{
+          position: "fixed", top: 20, right: 20, zIndex: 9999,
+          padding: "12px 20px", borderRadius: 10, fontSize: 13, fontWeight: 600,
+          background: toast.ok ? "rgba(34,197,94,0.15)" : "rgba(220,38,38,0.15)",
+          border: `1px solid ${toast.ok ? "rgba(34,197,94,0.4)" : "rgba(220,38,38,0.4)"}`,
+          color: toast.ok ? "#4ade80" : "#f87171",
+          boxShadow: "0 4px 24px rgba(0,0,0,0.4)",
+        }}>
+          {toast.ok ? "✓" : "✗"} {toast.msg}
+        </div>
+      )}
       {/* Summary cards */}
       <div className="journey-summary-cards">
         {[
@@ -357,6 +414,8 @@ export default function ClinicalJourneys({ activeTab }) {
               journey={j}
               onCheckin={handleCheckin}
               onResolve={handleResolve}
+              checkinLoading={checkinLoading === j.journey_id}
+              resolveLoading={resolveLoading === j.journey_id}
             />
           ))}
         </div>

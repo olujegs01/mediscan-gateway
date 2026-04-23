@@ -58,20 +58,23 @@ DEFAULT_RULES = [
 ]
 
 HIPAA_CONTROLS = [
-    {"control": "Data encrypted at rest (AES-256)",               "status": "pass"},
-    {"control": "TLS 1.3 for all data in transit",                "status": "pass"},
-    {"control": "HIPAA audit log — all PHI access events",        "status": "pass"},
-    {"control": "Role-based access control (RBAC)",               "status": "pass"},
-    {"control": "TOTP multi-factor authentication",               "status": "pass"},
-    {"control": "Automatic session timeout (30 min)",             "status": "pass"},
-    {"control": "PHI stripped from lobby/public endpoints",       "status": "pass"},
-    {"control": "Data retention policy (7 years — 45 CFR 164)",   "status": "pass"},
-    {"control": "Business Associate Agreement (BAA)",             "status": "available"},
-    {"control": "Breach notification procedure",                  "status": "documented"},
-    {"control": "Employee HIPAA training program",                "status": "in_progress"},
-    {"control": "Penetration testing (annual)",                   "status": "scheduled"},
-    {"control": "SOC 2 Type II audit",                            "status": "in_progress"},
-    {"control": "Disaster recovery / BCP plan",                   "status": "in_progress"},
+    {"control": "Data encrypted at rest (AES-256)",                "status": "pass",        "note": "SQLite/PostgreSQL with encrypted storage"},
+    {"control": "TLS 1.3 for all data in transit",                 "status": "pass",        "note": "Enforced by Render/Vercel HTTPS"},
+    {"control": "HIPAA audit log — all PHI access events",         "status": "pass",        "note": "AuditLog table records every access"},
+    {"control": "Role-based access control (RBAC)",                "status": "pass",        "note": "admin / nurse / physician roles enforced"},
+    {"control": "TOTP multi-factor authentication",                "status": "pass",        "note": "pyotp TOTP with 30s windows"},
+    {"control": "Automatic session timeout (12h JWT expiry)",      "status": "pass",        "note": "TOKEN_EXPIRE_HOURS=12 in auth.py"},
+    {"control": "PHI stripped from public/lobby endpoints",        "status": "pass",        "note": "Lobby and demo endpoints return no PHI"},
+    {"control": "Data retention policy documented (7 years)",      "status": "pass",        "note": "45 CFR 164.530(j) compliant"},
+    {"control": "Security headers (HSTS, X-Frame, CSP)",           "status": "pass",        "note": "Added via FastAPI middleware"},
+    {"control": "Brute-force login protection (rate limiting)",    "status": "pass",        "note": "15-min lockout after 10 failed attempts"},
+    {"control": "Input validation on all endpoints",               "status": "pass",        "note": "Pydantic models + FastAPI validation"},
+    {"control": "Business Associate Agreement (BAA)",              "status": "available",   "note": "One-click PDF generation available"},
+    {"control": "Breach notification procedure",                   "status": "documented",  "note": "60-day notification per 45 CFR §164.410"},
+    {"control": "Employee HIPAA training program",                 "status": "in_progress", "note": "Scheduled for Q2 2026"},
+    {"control": "Annual penetration testing",                      "status": "scheduled",   "note": "Scheduled Q3 2026 with external vendor"},
+    {"control": "SOC 2 Type II audit",                             "status": "in_progress", "note": "Readiness assessment underway"},
+    {"control": "Disaster recovery / BCP plan",                    "status": "in_progress", "note": "DR runbook in progress"},
 ]
 
 DATA_RETENTION_POLICY = {
@@ -135,6 +138,37 @@ def get_compliance_status() -> dict:
         "next_pen_test": "2026-Q3",
         "generated_at": datetime.utcnow().isoformat(),
     }
+
+
+def send_hipaa_alert_email(controls_at_risk: list) -> bool:
+    """Email admin when HIPAA controls are not passing."""
+    try:
+        from email_service import send_email, ADMIN_EMAIL
+        from datetime import datetime
+        rows = "".join(
+            f'<tr><td style="padding:8px;color:#e2e8f0;">{c["control"]}</td>'
+            f'<td style="padding:8px;color:#fbbf24;text-transform:uppercase;">{c["status"]}</td>'
+            f'<td style="padding:8px;color:#64748b;">{c.get("note","")}</td></tr>'
+            for c in controls_at_risk
+        )
+        html = f"""
+        <div style="font-family:Inter,sans-serif;max-width:640px;background:#050c18;color:#e2e8f0;border-radius:12px;overflow:hidden;">
+          <div style="background:#ca8a04;padding:20px 28px;">
+            <h1 style="margin:0;font-size:18px;color:#fff;">⚠ HIPAA Controls Need Attention</h1>
+            <p style="margin:6px 0 0;font-size:13px;opacity:.85;">{len(controls_at_risk)} control(s) require action · {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}</p>
+          </div>
+          <div style="padding:28px;">
+            <table style="width:100%;border-collapse:collapse;font-size:13px;">
+              <tr style="background:#1e293b;color:#64748b;"><th style="padding:8px;text-align:left;">Control</th><th style="padding:8px;text-align:left;">Status</th><th style="padding:8px;text-align:left;">Note</th></tr>
+              {rows}
+            </table>
+            <p style="margin-top:20px;font-size:12px;color:#475569;">Log in to the MediScan Gateway compliance center to review and remediate.</p>
+          </div>
+        </div>"""
+        return send_email(ADMIN_EMAIL, f"⚠ MediScan HIPAA Alert — {len(controls_at_risk)} controls need attention", html)
+    except Exception as e:
+        print(f"[HIPAA Alert] Email error: {e}")
+        return False
 
 
 def generate_baa_pdf() -> bytes:

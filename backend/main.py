@@ -2,6 +2,8 @@ import asyncio
 import json
 from datetime import datetime
 from typing import List
+import os as _os
+from collections import defaultdict
 
 from fastapi import FastAPI, Depends, Query, HTTPException, status, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -50,13 +52,56 @@ from email_service import notify_demo_request, notify_journey_escalation, send_s
 
 app = FastAPI(title="MediScan Gateway API", version="2.0")
 
+_ALLOWED_ORIGINS = [
+    _os.getenv("FRONTEND_URL", "https://mediscan-gateway.vercel.app"),
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "https://mediscan-gateway.vercel.app",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "stripe-signature"],
+    expose_headers=["Content-Disposition"],
+    max_age=600,
 )
 app.add_middleware(AuditMiddleware)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains; preload"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Cache-Control"] = "no-store" if request.url.path.startswith("/auth") else response.headers.get("Cache-Control", "no-cache")
+    return response
+
+# Brute-force login protection: max 10 attempts per IP in 15-minute window
+_login_attempts: dict = defaultdict(lambda: {"count": 0, "window_start": datetime.utcnow()})
+_MAX_LOGIN_ATTEMPTS = 10
+_LOGIN_WINDOW_SECONDS = 900
+
+
+async def _auto_generate_soap(patient_id: str, patient_data: dict):
+    """Background: generate SOAP note immediately after scan so it's ready when nurse opens it."""
+    try:
+        db = next(get_db())
+        try:
+            from soap_note import generate_soap_note as _gen_soap, save_soap_note as _save_soap
+            import asyncio
+            loop = asyncio.get_event_loop()
+            note = await loop.run_in_executor(None, _gen_soap, patient_data)
+            _save_soap(db, patient_id, note, generated_by="AI-Auto")
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"[Auto-SOAP] Error: {e}")
 
 
 @app.on_event("startup")
@@ -91,8 +136,27 @@ er_queue: List[dict] = []
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 @app.post("/auth/login", response_model=TokenResponse)
-def auth_login(data: LoginRequest):
-    return login(data)
+def auth_login(data: LoginRequest, request: Request):
+    client_ip = (request.client.host if request.client else "unknown")[:45]
+    now = datetime.utcnow()
+    rec = _login_attempts[client_ip]
+    window_age = (now - rec["window_start"]).total_seconds()
+    if window_age > _LOGIN_WINDOW_SECONDS:
+        rec["count"] = 0
+        rec["window_start"] = now
+    if rec["count"] >= _MAX_LOGIN_ATTEMPTS:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many failed login attempts. Try again in {int((_LOGIN_WINDOW_SECONDS - window_age) / 60) + 1} minutes.",
+        )
+    try:
+        result = login(data)
+        rec["count"] = 0  # reset on success
+        return result
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+            rec["count"] += 1
+        raise
 
 
 @app.get("/auth/me")
@@ -605,6 +669,26 @@ def trigger_manual_checkin(
     return manual_checkin(db, journey_id)
 
 
+@app.post("/journeys/{journey_id}/resolve")
+def resolve_journey(
+    journey_id: str,
+    token: dict = Depends(require_role("admin", "nurse", "physician")),
+    db: Session = Depends(get_db),
+):
+    from database import ClinicalJourney as CJModel
+    journey = db.query(CJModel).filter_by(id=journey_id).first()
+    if not journey:
+        raise HTTPException(status_code=404, detail="Journey not found")
+    journey.journey_status = "completed"
+    journey.completed_at = datetime.utcnow()
+    if journey.escalated_reason:
+        journey.escalated_reason += " [RESOLVED by staff]"
+    db.commit()
+    write_audit(db, token["sub"], token["role"], "resolve_journey",
+                details={"journey_id": journey_id})
+    return {"resolved": True, "journey_id": journey_id}
+
+
 # ── Twilio SMS Webhook ────────────────────────────────────────────────────────
 
 @app.post("/twilio/sms")
@@ -1100,6 +1184,7 @@ async def scan_stream(
         }
 
         er_queue.append(result)
+        asyncio.create_task(_auto_generate_soap(patient_id, result))
         asyncio.create_task(ws_manager.broadcast_all("patient_added", result))
 
         # Persist to DB
