@@ -123,6 +123,7 @@ class ClinicalJourney(Base):
     completed_at = Column(DateTime, nullable=True)
     escalated_reason = Column(Text, nullable=True)
     checkin_log = Column(JSON, default=list)
+    portal_token = Column(String, unique=True, nullable=True, index=True)
 
 
 class AppointmentSlot(Base):
@@ -171,6 +172,19 @@ class EscalationRule(Base):
     action = Column(String)            # notify_attending | page_charge_nurse | activate_rapid_response
     response_time_minutes = Column(Integer, default=5)
     enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class DemoRequest(Base):
+    __tablename__ = "demo_requests"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String)
+    hospital = Column(String)
+    role = Column(String)
+    email = Column(String)
+    bed_count = Column(Integer, nullable=True)
+    message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 

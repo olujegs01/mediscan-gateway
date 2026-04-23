@@ -44,6 +44,8 @@ from compliance import (
     get_compliance_status, get_escalation_rules, toggle_rule, update_rule,
     seed_escalation_rules, generate_baa_pdf,
 )
+from demo_seeder import seed_demo_data
+from database import DemoRequest, ClinicalJourney as ClinicalJourneyModel
 
 app = FastAPI(title="MediScan Gateway API", version="2.0")
 
@@ -75,6 +77,7 @@ async def startup():
     # Seed scheduling slots + escalation rules + journey loop
     seed_slots(db)
     seed_escalation_rules(db)
+    seed_demo_data(db)
     asyncio.create_task(journey_monitor_loop(get_db, ws_manager.broadcast_all))
 
 
@@ -707,6 +710,75 @@ def public_stats(db: Session = Depends(get_db)):
         "languages_supported": 10,
         "uptime_pct": 99.97,
     }
+
+
+# ── Demo Request (lead capture) ───────────────────────────────────────────────
+
+class DemoRequestBody(PydanticBase):
+    name: str
+    hospital: str
+    role: str
+    email: str
+    bed_count: int | None = None
+    message: str | None = None
+
+
+@app.post("/demo-request")
+def submit_demo_request(body: DemoRequestBody, db: Session = Depends(get_db)):
+    req = DemoRequest(
+        name=body.name,
+        hospital=body.hospital,
+        role=body.role,
+        email=body.email,
+        bed_count=body.bed_count,
+        message=body.message,
+    )
+    db.add(req)
+    db.commit()
+    return {"success": True, "message": "Demo request received — we'll be in touch within 24 hours."}
+
+
+# ── Patient Portal ────────────────────────────────────────────────────────────
+
+@app.get("/patient/portal/{token}")
+def patient_portal(token: str, db: Session = Depends(get_db)):
+    journey = db.query(ClinicalJourneyModel).filter_by(portal_token=token).first()
+    if not journey:
+        raise HTTPException(status_code=404, detail="Portal link not found or expired.")
+    schedule_hours = {1: [24, 48], 2: [24, 72], 3: [72, 168], 4: [168], 5: [168]}
+    schedule = schedule_hours.get(journey.esi_level, [168])
+    upcoming = []
+    for i, h in enumerate(schedule):
+        if i >= (journey.checkins_completed or 0):
+            due = journey.discharge_at + __import__("datetime").timedelta(hours=h)
+            upcoming.append({"checkin_num": i + 1, "due_at": due.isoformat(), "hours_post_discharge": h})
+    return {
+        "name": journey.name,
+        "esi_level": journey.esi_level,
+        "journey_status": journey.journey_status,
+        "discharge_at": journey.discharge_at.isoformat() if journey.discharge_at else None,
+        "checkins_completed": journey.checkins_completed or 0,
+        "checkins_total": journey.checkins_total or 2,
+        "last_response": journey.last_response,
+        "last_checkin_at": journey.last_checkin_at.isoformat() if journey.last_checkin_at else None,
+        "escalated_reason": journey.escalated_reason,
+        "checkin_log": journey.checkin_log or [],
+        "upcoming_checkins": upcoming,
+    }
+
+
+class PortalResponseBody(PydanticBase):
+    response: str
+
+
+@app.post("/patient/portal/{token}/respond")
+def patient_portal_respond(token: str, body: PortalResponseBody, db: Session = Depends(get_db)):
+    from clinical_journeys import process_sms_response
+    journey = db.query(ClinicalJourneyModel).filter_by(portal_token=token).first()
+    if not journey:
+        raise HTTPException(status_code=404, detail="Portal link not found.")
+    result = process_sms_response(db, journey.phone, body.response)
+    return {"success": True, "escalated": result.get("escalated", False) if result else False}
 
 
 @app.get("/demo/patients")

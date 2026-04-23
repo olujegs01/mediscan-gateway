@@ -5,6 +5,7 @@ If symptoms worsen, escalates via WebSocket alert to staff.
 """
 import asyncio
 import os
+import uuid
 from datetime import datetime, timedelta
 from typing import Callable
 from sqlalchemy.orm import Session
@@ -37,6 +38,7 @@ def trigger_journey(db: Session, patient_id: str, name: str, phone: str, esi_lev
     if existing:
         return {"journey_id": existing.id, "already_active": True}
 
+    portal_token = str(uuid.uuid4())
     journey = ClinicalJourney(
         patient_id=patient_id,
         name=name,
@@ -47,10 +49,17 @@ def trigger_journey(db: Session, patient_id: str, name: str, phone: str, esi_lev
         checkins_total=len(schedule),
         next_checkin_at=next_checkin,
         checkin_log=[],
+        portal_token=portal_token,
     )
     db.add(journey)
     db.commit()
-    return {"journey_id": journey.id, "next_checkin_at": next_checkin.isoformat(), "checkins_planned": len(schedule)}
+    base_url = os.getenv("FRONTEND_URL", "https://mediscan-gateway.vercel.app")
+    return {
+        "journey_id": journey.id,
+        "next_checkin_at": next_checkin.isoformat(),
+        "checkins_planned": len(schedule),
+        "portal_url": f"{base_url}/patient?token={portal_token}",
+    }
 
 
 def get_journeys(db: Session, status: str = None) -> list:
@@ -196,4 +205,5 @@ def _journey_to_dict(j: ClinicalJourney) -> dict:
         "next_checkin_at": j.next_checkin_at.isoformat() if j.next_checkin_at else None,
         "escalated_reason": j.escalated_reason,
         "checkin_log": j.checkin_log or [],
+        "portal_token": j.portal_token,
     }

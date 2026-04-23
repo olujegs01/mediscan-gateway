@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useAuth, API_BASE } from "./AuthContext";
 
 const ESI_CONFIG = {
@@ -241,6 +241,269 @@ function ModuleCard({ mod }) {
   );
 }
 
+const PRICING_TIERS = [
+  {
+    name: "Starter",
+    price: "$4,500",
+    period: "/mo",
+    beds: "Up to 20 beds",
+    color: "#0284c7",
+    features: [
+      "Walk-Through Triage Scanner",
+      "AI CareNavigator (500 assessments/mo)",
+      "Live ER Queue & Bed Board",
+      "HIPAA Audit Log",
+      "Email support",
+    ],
+    cta: "Get Started",
+    highlight: false,
+  },
+  {
+    name: "Growth",
+    price: "$12,000",
+    period: "/mo",
+    beds: "Up to 100 beds",
+    color: "#0d9488",
+    features: [
+      "Everything in Starter",
+      "Clinical Journeys™ (post-discharge)",
+      "AI SOAP Notes",
+      "SMS Triage + Twilio integration",
+      "Outcomes Command Dashboard",
+      "BAA + Compliance Center",
+      "Priority support + onboarding",
+    ],
+    cta: "Start Free Trial",
+    highlight: true,
+  },
+  {
+    name: "Enterprise",
+    price: "Custom",
+    period: "",
+    beds: "Unlimited beds",
+    color: "#7c3aed",
+    features: [
+      "Everything in Growth",
+      "Epic / EHR deep integration",
+      "White-label branding",
+      "Dedicated CSM + SLA",
+      "Custom escalation rules",
+      "SOC 2 Type II report",
+      "On-premise deployment option",
+    ],
+    cta: "Contact Sales",
+    highlight: false,
+  },
+];
+
+function ROICalculator() {
+  const [beds, setBeds] = useState(50);
+  const [dailyVolume, setDailyVolume] = useState(120);
+  const [currentWait, setCurrentWait] = useState(90);
+  const [lwbsRate, setLwbsRate] = useState(4.5);
+
+  const annualPatients = dailyVolume * 365;
+  const lwbsReduced = Math.round(annualPatients * (lwbsRate / 100) * 0.6);
+  const avgRevenuePerPatient = 1850;
+  const lwbsRevenue = lwbsReduced * avgRevenuePerPatient;
+  const readmissionsAverted = Math.round(annualPatients * 0.014 * 0.85);
+  const readmissionSavings = readmissionsAverted * 14500;
+  const edDiverted = Math.round(annualPatients * 0.12);
+  const diversionSavings = edDiverted * 480;
+  const totalSavings = lwbsRevenue + readmissionSavings + diversionSavings;
+
+  const Slider = ({ label, value, min, max, step = 1, unit, onChange }) => (
+    <div className="roi-slider-row">
+      <div className="roi-slider-header">
+        <span className="roi-slider-label">{label}</span>
+        <span className="roi-slider-val">{value}{unit}</span>
+      </div>
+      <input type="range" min={min} max={max} step={step} value={value}
+        onChange={e => onChange(Number(e.target.value))}
+        className="roi-range"
+      />
+      <div className="roi-slider-bounds"><span>{min}{unit}</span><span>{max}{unit}</span></div>
+    </div>
+  );
+
+  return (
+    <div className="roi-section">
+      <div className="lp-modules-pill" style={{ margin: "0 auto 16px" }}>
+        <span className="lp-tag-dot" />
+        ROI Calculator
+      </div>
+      <h2 className="lp-modules-headline">How much could you save?</h2>
+      <p className="lp-modules-sub">Adjust the sliders to your ED's parameters and see your estimated annual impact.</p>
+
+      <div className="roi-layout">
+        <div className="roi-inputs">
+          <Slider label="ED Beds" value={beds} min={10} max={300} unit=" beds" onChange={setBeds} />
+          <Slider label="Daily Patient Volume" value={dailyVolume} min={20} max={500} unit="/day" onChange={setDailyVolume} />
+          <Slider label="Current Avg Wait Time" value={currentWait} min={15} max={200} unit=" min" onChange={setCurrentWait} />
+          <Slider label="Current LWBS Rate" value={lwbsRate} min={0.5} max={12} step={0.5} unit="%" onChange={setLwbsRate} />
+        </div>
+
+        <div className="roi-results">
+          <div className="roi-total">
+            <div className="roi-total-label">Estimated Annual Savings</div>
+            <div className="roi-total-val">${(totalSavings / 1e6).toFixed(1)}M</div>
+          </div>
+          <div className="roi-breakdown">
+            {[
+              ["LWBS Revenue Recovered", lwbsRevenue, `${lwbsReduced.toLocaleString()} patients retained`],
+              ["Readmission Cost Averted", readmissionSavings, `${readmissionsAverted} readmissions prevented`],
+              ["ED Diversion Savings", diversionSavings, `${edDiverted.toLocaleString()} patients routed to lower acuity`],
+            ].map(([label, val, sub]) => (
+              <div key={label} className="roi-line">
+                <div>
+                  <div className="roi-line-label">{label}</div>
+                  <div className="roi-line-sub">{sub}</div>
+                </div>
+                <div className="roi-line-val">${(val / 1000).toFixed(0)}k</div>
+              </div>
+            ))}
+          </div>
+          <div className="roi-disclaimer">
+            Estimates based on published ED benchmark data. Actual results vary.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PricingSection({ onBookDemo }) {
+  return (
+    <div className="pricing-section">
+      <div className="lp-modules-pill" style={{ margin: "0 auto 16px" }}>
+        <span className="lp-tag-dot" />
+        Pricing
+      </div>
+      <h2 className="lp-modules-headline">Simple, transparent pricing</h2>
+      <p className="lp-modules-sub">No per-seat fees. No hidden costs. Cancel anytime.</p>
+
+      <div className="pricing-grid">
+        {PRICING_TIERS.map(tier => (
+          <div key={tier.name} className={`pricing-card ${tier.highlight ? "highlight" : ""}`}
+            style={tier.highlight ? { borderColor: tier.color } : {}}>
+            {tier.highlight && <div className="pricing-popular">Most Popular</div>}
+            <div className="pricing-name" style={{ color: tier.color }}>{tier.name}</div>
+            <div className="pricing-price">
+              <span className="pricing-amount">{tier.price}</span>
+              <span className="pricing-period">{tier.period}</span>
+            </div>
+            <div className="pricing-beds">{tier.beds}</div>
+            <ul className="pricing-features">
+              {tier.features.map(f => (
+                <li key={f}>
+                  <span style={{ color: tier.color }}>✓</span> {f}
+                </li>
+              ))}
+            </ul>
+            <button
+              className="pricing-cta"
+              style={tier.highlight ? { background: tier.color } : { borderColor: tier.color, color: tier.color }}
+              onClick={onBookDemo}
+            >
+              {tier.cta}
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BookDemoModal({ onClose }) {
+  const [form, setForm] = useState({ name: "", hospital: "", role: "", email: "", bed_count: "", message: "" });
+  const [submitting, setSubmitting] = useState(false);
+  const [success, setSuccess] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!form.name || !form.email || !form.hospital) { setError("Name, email, and hospital are required."); return; }
+    setSubmitting(true);
+    setError("");
+    try {
+      const res = await fetch(`${API_BASE}/demo-request`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...form, bed_count: form.bed_count ? Number(form.bed_count) : null }),
+      });
+      const json = await res.json();
+      if (json.success) setSuccess(true);
+      else setError("Submission failed. Please try again.");
+    } catch {
+      setError("Network error. Please try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="demo-modal-overlay" onClick={onClose}>
+      <div className="demo-modal" onClick={e => e.stopPropagation()}>
+        <div className="demo-modal-header">
+          <div>
+            <h2 className="demo-modal-title">Book a Demo</h2>
+            <p className="demo-modal-sub">We'll reach out within 24 hours to schedule a personalized walkthrough.</p>
+          </div>
+          <button className="demo-modal-close" onClick={onClose}>✕</button>
+        </div>
+
+        {success ? (
+          <div className="demo-success">
+            <div className="demo-success-icon">✓</div>
+            <h3>Request Received!</h3>
+            <p>We'll be in touch within 24 hours to schedule your demo.</p>
+            <button className="lp-nav-cta" style={{ marginTop: 16 }} onClick={onClose}>Close</button>
+          </div>
+        ) : (
+          <form onSubmit={submit} className="demo-form">
+            <div className="demo-form-row">
+              <div className="form-group">
+                <label>Full Name *</label>
+                <input placeholder="Dr. Jane Smith" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
+              </div>
+              <div className="form-group">
+                <label>Email *</label>
+                <input type="email" placeholder="jane@hospital.org" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))} />
+              </div>
+            </div>
+            <div className="demo-form-row">
+              <div className="form-group">
+                <label>Hospital / Health System *</label>
+                <input placeholder="General Hospital" value={form.hospital} onChange={e => setForm(f => ({ ...f, hospital: e.target.value }))} />
+              </div>
+              <div className="form-group">
+                <label>Your Role</label>
+                <select value={form.role} onChange={e => setForm(f => ({ ...f, role: e.target.value }))}>
+                  <option value="">Select…</option>
+                  {["CMO / CMIO", "ED Medical Director", "Charge Nurse / CNO", "IT / CIO", "Operations", "Other"].map(r => <option key={r}>{r}</option>)}
+                </select>
+              </div>
+            </div>
+            <div className="form-group">
+              <label>Approximate Bed Count</label>
+              <input type="number" placeholder="e.g. 50" value={form.bed_count} onChange={e => setForm(f => ({ ...f, bed_count: e.target.value }))} />
+            </div>
+            <div className="form-group">
+              <label>Anything you'd like us to know?</label>
+              <textarea rows={3} placeholder="Current pain points, integration requirements, timeline…"
+                value={form.message} onChange={e => setForm(f => ({ ...f, message: e.target.value }))} />
+            </div>
+            {error && <div className="login-error">{error}</div>}
+            <button type="submit" className="scan-btn" disabled={submitting} style={{ width: "100%" }}>
+              {submitting ? "Submitting…" : "Request Demo →"}
+            </button>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function LoginPage() {
   const { login } = useAuth();
   const [stats, setStats] = useState(null);
@@ -248,7 +511,9 @@ export default function LoginPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [mfaRequired, setMfaRequired] = useState(false);
+  const [showDemoModal, setShowDemoModal] = useState(false);
   const modulesRef = useRef(null);
+  const pricingRef = useRef(null);
 
   useEffect(() => {
     fetch(`${API_BASE}/stats`).then(r => r.ok ? r.json() : null).then(setStats).catch(() => {});
@@ -268,8 +533,11 @@ export default function LoginPage() {
     }
   };
 
+  const openDemo = useCallback(() => setShowDemoModal(true), []);
+
   return (
     <div className="lp-root">
+      {showDemoModal && <BookDemoModal onClose={() => setShowDemoModal(false)} />}
 
       {/* ── Top nav ── */}
       <nav className="lp-nav">
@@ -280,12 +548,16 @@ export default function LoginPage() {
         </div>
         <div className="lp-nav-links">
           <a href="#modules" onClick={e => { e.preventDefault(); modulesRef.current?.scrollIntoView({ behavior: "smooth" }); }}>Platform</a>
+          <a href="#pricing" onClick={e => { e.preventDefault(); pricingRef.current?.scrollIntoView({ behavior: "smooth" }); }}>Pricing</a>
           <a href="/check" target="_blank" rel="noopener noreferrer">CareNavigator</a>
           <a href="/lobby" target="_blank" rel="noopener noreferrer">Lobby Display</a>
         </div>
-        <a href="#login" className="lp-nav-cta" onClick={e => { e.preventDefault(); document.getElementById("lp-login-form")?.scrollIntoView({ behavior: "smooth" }); }}>
-          Sign In →
-        </a>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button className="lp-nav-demo-btn" onClick={openDemo}>Book Demo</button>
+          <a href="#login" className="lp-nav-cta" onClick={e => { e.preventDefault(); document.getElementById("lp-login-form")?.scrollIntoView({ behavior: "smooth" }); }}>
+            Sign In →
+          </a>
+        </div>
       </nav>
 
       {/* ── Hero ── */}
@@ -321,6 +593,14 @@ export default function LoginPage() {
             {["✓ HIPAA Compliant", "✓ BAA Available", "✓ SOC 2 In Progress", "🔒 E2E Encrypted"].map(b => (
               <span key={b} className="lp-trust-badge">{b}</span>
             ))}
+          </div>
+
+          <div style={{ display: "flex", gap: 12, marginBottom: 28 }}>
+            <button className="lp-hero-cta-primary" onClick={openDemo}>Book a Demo →</button>
+            <a href="#modules" className="lp-hero-cta-secondary"
+              onClick={e => { e.preventDefault(); modulesRef.current?.scrollIntoView({ behavior: "smooth" }); }}>
+              See Platform ↓
+            </a>
           </div>
 
           <div className="lp-demo-section">
@@ -414,6 +694,14 @@ export default function LoginPage() {
         <div className="lp-modules-grid">
           {MODULES.map(mod => <ModuleCard key={mod.title} mod={mod} />)}
         </div>
+      </div>
+
+      {/* ── ROI Calculator ── */}
+      <ROICalculator />
+
+      {/* ── Pricing ── */}
+      <div ref={pricingRef}>
+        <PricingSection onBookDemo={openDemo} />
       </div>
 
       {/* ── Outcomes strip ── */}

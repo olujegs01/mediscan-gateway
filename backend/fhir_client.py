@@ -12,9 +12,12 @@ import os
 import time
 import httpx
 
-_CLIENT_ID  = os.getenv("EPIC_CLIENT_ID", "")
-_TOKEN_URL  = os.getenv("EPIC_TOKEN_URL", "https://fhir.epic.com/interconnect-fhir-oauth/oauth2/token")
-_FHIR_BASE  = os.getenv("EPIC_FHIR_BASE", "https://fhir.epic.com/interconnect-fhir-oauth/api/FHIR/R4")
+_CLIENT_ID   = os.getenv("EPIC_CLIENT_ID", "")
+_TOKEN_URL   = os.getenv("EPIC_TOKEN_URL", "https://fhir.epic.com/interconnect-fhir-oauth/oauth2/token")
+_FHIR_BASE   = os.getenv("EPIC_FHIR_BASE", "https://fhir.epic.com/interconnect-fhir-oauth/api/FHIR/R4")
+
+# Public sandbox — no auth required, used when Epic creds are absent
+_SANDBOX_BASE = os.getenv("FHIR_SANDBOX_URL", "https://hapi.fhir.org/baseR4")
 
 _token_cache: dict = {"token": None, "expires_at": 0}
 
@@ -41,6 +44,34 @@ def _get_token() -> str | None:
         return None
 
 
+def search_patient_sandbox(name: str) -> dict | None:
+    """Public HAPI FHIR R4 sandbox lookup — no auth, used for demo."""
+    parts = name.strip().split()
+    params = {"_count": "1", "_format": "json"}
+    if len(parts) >= 2:
+        params["given"] = parts[0]
+        params["family"] = parts[-1]
+    else:
+        params["name"] = name
+    try:
+        r = httpx.get(
+            f"{_SANDBOX_BASE}/Patient",
+            params=params,
+            headers={"Accept": "application/fhir+json"},
+            timeout=6,
+        )
+        if r.status_code != 200:
+            return None
+        bundle = r.json()
+        entries = bundle.get("entry", [])
+        if not entries:
+            return None
+        return _parse_patient(entries[0]["resource"])
+    except Exception as e:
+        print(f"[FHIR sandbox] search error: {e}")
+        return None
+
+
 def search_patient(name: str, dob: str = None) -> dict | None:
     """
     Search for a Patient by name (and optionally DOB).
@@ -48,7 +79,7 @@ def search_patient(name: str, dob: str = None) -> dict | None:
     """
     token = _get_token()
     if not token:
-        return None
+        return search_patient_sandbox(name)  # fall through to public sandbox
 
     parts = name.strip().split()
     params = {"_count": "1"}
@@ -157,4 +188,8 @@ def _parse_patient(res: dict) -> dict:
 
 
 def fhir_available() -> bool:
-    return bool(_CLIENT_ID)
+    return True  # sandbox always available; Epic active only when CLIENT_ID set
+
+
+def fhir_mode() -> str:
+    return "epic" if _CLIENT_ID else "sandbox"
