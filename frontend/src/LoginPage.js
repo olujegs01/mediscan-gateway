@@ -400,6 +400,35 @@ function ROICalculator() {
 }
 
 function PricingSection({ onBookDemo }) {
+  const [checkoutLoading, setCheckoutLoading] = useState(null);
+  const [checkoutMsg, setCheckoutMsg] = useState("");
+
+  const handleStripe = async (tier) => {
+    const tierKey = tier.name.toLowerCase();
+    if (tierKey === "enterprise") { onBookDemo(); return; }
+    setCheckoutLoading(tierKey);
+    setCheckoutMsg("");
+    try {
+      const res = await fetch(`${API_BASE}/billing/create-checkout-session`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tier: tierKey }),
+      });
+      const data = await res.json();
+      if (data.checkout_url) {
+        window.location.href = data.checkout_url;
+      } else if (data.demo_mode) {
+        setCheckoutMsg(data.message);
+      } else if (data.error) {
+        setCheckoutMsg(data.error);
+      }
+    } catch {
+      setCheckoutMsg("Network error — please try again.");
+    } finally {
+      setCheckoutLoading(null);
+    }
+  };
+
   return (
     <div className="pricing-section">
       <div className="lp-modules-pill" style={{ margin: "0 auto 16px" }}>
@@ -409,33 +438,47 @@ function PricingSection({ onBookDemo }) {
       <h2 className="lp-modules-headline">Simple, transparent pricing</h2>
       <p className="lp-modules-sub">No per-seat fees. No hidden costs. Cancel anytime.</p>
 
+      {checkoutMsg && (
+        <div style={{
+          maxWidth: 600, margin: "0 auto 20px", padding: "12px 16px", fontSize: 13, borderRadius: 10,
+          background: "rgba(13,148,136,0.1)", border: "1px solid rgba(13,148,136,0.3)", color: "#5eead4",
+        }}>
+          ℹ {checkoutMsg}
+        </div>
+      )}
+
       <div className="pricing-grid">
-        {PRICING_TIERS.map(tier => (
-          <div key={tier.name} className={`pricing-card ${tier.highlight ? "highlight" : ""}`}
-            style={tier.highlight ? { borderColor: tier.color } : {}}>
-            {tier.highlight && <div className="pricing-popular">Most Popular</div>}
-            <div className="pricing-name" style={{ color: tier.color }}>{tier.name}</div>
-            <div className="pricing-price">
-              <span className="pricing-amount">{tier.price}</span>
-              <span className="pricing-period">{tier.period}</span>
+        {PRICING_TIERS.map(tier => {
+          const tierKey = tier.name.toLowerCase();
+          const isLoading = checkoutLoading === tierKey;
+          return (
+            <div key={tier.name} className={`pricing-card ${tier.highlight ? "highlight" : ""}`}
+              style={tier.highlight ? { borderColor: tier.color } : {}}>
+              {tier.highlight && <div className="pricing-popular">Most Popular</div>}
+              <div className="pricing-name" style={{ color: tier.color }}>{tier.name}</div>
+              <div className="pricing-price">
+                <span className="pricing-amount">{tier.price}</span>
+                <span className="pricing-period">{tier.period}</span>
+              </div>
+              <div className="pricing-beds">{tier.beds}</div>
+              <ul className="pricing-features">
+                {tier.features.map(f => (
+                  <li key={f}>
+                    <span style={{ color: tier.color }}>✓</span> {f}
+                  </li>
+                ))}
+              </ul>
+              <button
+                className="pricing-cta"
+                style={tier.highlight ? { background: tier.color } : { borderColor: tier.color, color: tier.color }}
+                onClick={() => handleStripe(tier)}
+                disabled={isLoading}
+              >
+                {isLoading ? "Redirecting…" : tier.cta}
+              </button>
             </div>
-            <div className="pricing-beds">{tier.beds}</div>
-            <ul className="pricing-features">
-              {tier.features.map(f => (
-                <li key={f}>
-                  <span style={{ color: tier.color }}>✓</span> {f}
-                </li>
-              ))}
-            </ul>
-            <button
-              className="pricing-cta"
-              style={tier.highlight ? { background: tier.color } : { borderColor: tier.color, color: tier.color }}
-              onClick={onBookDemo}
-            >
-              {tier.cta}
-            </button>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

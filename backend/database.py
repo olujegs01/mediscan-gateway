@@ -199,6 +199,21 @@ class EscalationRule(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class Subscription(Base):
+    __tablename__ = "subscriptions"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    hospital_id = Column(String, index=True, default=_default_hospital)
+    tier = Column(String)              # starter | growth | enterprise
+    stripe_session_id = Column(String, nullable=True)
+    stripe_subscription_id = Column(String, nullable=True)
+    customer_email = Column(String, nullable=True)
+    hospital_name = Column(String, nullable=True)
+    status = Column(String, default="active")   # active | cancelled | past_due | trialing
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class DemoRequest(Base):
     __tablename__ = "demo_requests"
 

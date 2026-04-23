@@ -45,8 +45,8 @@ from compliance import (
     seed_escalation_rules, generate_baa_pdf,
 )
 from demo_seeder import seed_demo_data
-from database import DemoRequest, ClinicalJourney as ClinicalJourneyModel, Hospital
-from email_service import notify_demo_request, notify_journey_escalation
+from database import DemoRequest, ClinicalJourney as ClinicalJourneyModel, Hospital, Subscription, SOAPNote
+from email_service import notify_demo_request, notify_journey_escalation, send_shift_report_email
 
 app = FastAPI(title="MediScan Gateway API", version="2.0")
 
@@ -1124,3 +1124,139 @@ async def scan_stream(
         })
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+# ── SOAP Note inline edit ─────────────────────────────────────────────────────
+
+class SOAPNoteUpdate(PydanticBase):
+    subjective: str = None
+    objective: str = None
+    assessment: str = None
+    plan: str = None
+
+
+@app.patch("/chart/note/{patient_id}")
+def update_chart_note(
+    patient_id: str,
+    body: SOAPNoteUpdate,
+    token: dict = Depends(require_role("admin", "nurse", "physician")),
+    db: Session = Depends(get_db),
+):
+    note = db.query(SOAPNote).filter_by(patient_id=patient_id).first()
+    if not note:
+        raise HTTPException(status_code=404, detail="SOAP note not found")
+    if body.subjective is not None:
+        note.subjective = body.subjective
+    if body.objective is not None:
+        note.objective = body.objective
+    if body.assessment is not None:
+        note.assessment = body.assessment
+    if body.plan is not None:
+        note.plan = body.plan
+    note.full_text = (
+        f"SUBJECTIVE:\n{note.subjective}\n\n"
+        f"OBJECTIVE:\n{note.objective}\n\n"
+        f"ASSESSMENT:\n{note.assessment}\n\n"
+        f"PLAN:\n{note.plan}"
+    )
+    db.commit()
+    write_audit(db, token["sub"], token["role"], "edit_soap_note", patient_id=patient_id)
+    return {"updated": True, "patient_id": patient_id}
+
+
+# ── Shift report email ────────────────────────────────────────────────────────
+
+class ReportEmailBody(PydanticBase):
+    recipient: str = None   # defaults to ADMIN_EMAIL if not provided
+
+
+@app.post("/report/email")
+def email_report(
+    body: ReportEmailBody,
+    token: dict = Depends(require_role("admin", "nurse", "physician")),
+    db: Session = Depends(get_db),
+):
+    import random
+    now = datetime.utcnow()
+    start_dt = now.replace(hour=7, minute=0, second=0)
+
+    total = len(er_queue)
+    report_dict = {
+        "shift_start": start_dt.strftime("%Y-%m-%d %H:%M UTC"),
+        "shift_end": now.strftime("%Y-%m-%d %H:%M UTC"),
+        "generated_by": token["sub"],
+        "total_patients": total,
+        "esi_breakdown": {str(i): sum(1 for p in er_queue if p["esi_level"] == i) for i in range(1, 6)},
+        "avg_wait_minutes": int(sum(p.get("wait_time_estimate", 0) for p in er_queue) / total) if total else 0,
+        "sepsis_count": sum(1 for p in er_queue if p.get("triage_detail", {}).get("sepsis_probability") in ("high", "critical")),
+        "bh_count": sum(1 for p in er_queue if p.get("triage_detail", {}).get("behavioral_health_flag")),
+        "lwbs_high_risk_count": sum(1 for p in er_queue if p.get("triage_detail", {}).get("lwbs_risk") == "high"),
+        "admissions_predicted": sum(1 for p in er_queue if p.get("triage_detail", {}).get("admission_probability", 0) >= 60),
+    }
+    recipients = [body.recipient] if body.recipient else None
+    sent = send_shift_report_email(report_dict, recipients)
+    return {"sent": sent, "recipient": body.recipient or "admin"}
+
+
+# ── Stripe billing ────────────────────────────────────────────────────────────
+
+class CheckoutRequest(PydanticBase):
+    tier: str          # starter | growth
+    email: str = None
+    hospital: str = None
+
+
+@app.post("/billing/create-checkout-session")
+def billing_create_checkout(body: CheckoutRequest):
+    if body.tier not in ("starter", "growth"):
+        raise HTTPException(status_code=400, detail="tier must be 'starter' or 'growth'")
+    from billing import create_checkout_session
+    return create_checkout_session(body.tier, body.email, body.hospital)
+
+
+@app.post("/billing/webhook")
+async def billing_webhook(request: Request, db: Session = Depends(get_db)):
+    payload = await request.body()
+    sig = request.headers.get("stripe-signature", "")
+    from billing import handle_webhook
+    try:
+        result = handle_webhook(payload, sig)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if result.get("event") == "checkout.session.completed":
+        sub = Subscription(
+            tier=result.get("tier", "starter"),
+            stripe_session_id=result.get("session_id"),
+            stripe_subscription_id=result.get("subscription_id"),
+            customer_email=result.get("customer_email"),
+            hospital_name=result.get("hospital"),
+        )
+        db.add(sub)
+        db.commit()
+
+    if result.get("event") in ("customer.subscription.updated", "customer.subscription.deleted"):
+        sid = result.get("subscription_id")
+        if sid:
+            existing = db.query(Subscription).filter_by(stripe_subscription_id=sid).first()
+            if existing:
+                existing.status = result.get("status", existing.status)
+                db.commit()
+
+    return {"received": True}
+
+
+@app.get("/billing/status")
+def billing_status(db: Session = Depends(get_db)):
+    from billing import stripe_available
+    sub = db.query(Subscription).order_by(Subscription.created_at.desc()).first()
+    return {
+        "stripe_configured": stripe_available(),
+        "subscription": {
+            "tier": sub.tier,
+            "status": sub.status,
+            "customer_email": sub.customer_email,
+            "hospital_name": sub.hospital_name,
+            "created_at": sub.created_at.isoformat(),
+        } if sub else None,
+    }

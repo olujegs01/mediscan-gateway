@@ -4,6 +4,7 @@ import { useAuth, API_BASE } from "./AuthContext";
 import { useWebSocket } from "./hooks/useWebSocket";
 import ClinicalJourneys from "./ClinicalJourneys";
 import OutcomesDashboard from "./OutcomesDashboard";
+import BillingPage from "./BillingPage";
 
 const WS_BASE = API_BASE.replace(/^https/, "wss").replace(/^http/, "ws");
 
@@ -585,10 +586,13 @@ function AuditLogPanel({ user }) {
   );
 }
 
-function ShiftReportPanel({ user }) {
+function ShiftReportPanel({ user, queue = [] }) {
   const [generating, setGenerating] = useState(false);
+  const [emailing, setEmailing] = useState(false);
   const [reports, setReports] = useState([]);
   const [msg, setMsg] = useState("");
+  const [emailInput, setEmailInput] = useState("");
+  const [showEmailInput, setShowEmailInput] = useState(false);
 
   const loadReports = useCallback(async () => {
     try {
@@ -626,12 +630,41 @@ function ShiftReportPanel({ user }) {
         setMsg("Report saved.");
       }
       loadReports();
-    } catch (e) {
+    } catch {
       setMsg("Error generating report.");
     } finally {
       setGenerating(false);
     }
   };
+
+  const handleEmail = async () => {
+    setEmailing(true);
+    setMsg("");
+    try {
+      const res = await fetch(`${API_BASE}/report/email`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${user?.token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ recipient: emailInput || null }),
+      });
+      const data = await res.json();
+      setMsg(data.sent ? `Report emailed to ${data.recipient}.` : "Email failed — check server logs.");
+      setShowEmailInput(false);
+      setEmailInput("");
+    } catch {
+      setMsg("Network error sending email.");
+    } finally {
+      setEmailing(false);
+    }
+  };
+
+  // Live preview stats from current queue
+  const total = queue.length;
+  const esiCounts = [1,2,3,4,5].map(e => ({ level: e, count: queue.filter(p => p.esi_level === e).length }));
+  const sepsis = queue.filter(p => ["high","critical"].includes(p.triage_detail?.sepsis_probability)).length;
+  const bh = queue.filter(p => p.triage_detail?.behavioral_health_flag).length;
+  const admissions = queue.filter(p => (p.triage_detail?.admission_probability || 0) >= 60).length;
+  const avgWait = total ? Math.round(queue.reduce((s, p) => s + (p.wait_time_estimate || 0), 0) / total) : 0;
+  const esiColors = { 1: "#dc2626", 2: "#ea580c", 3: "#ca8a04", 4: "#16a34a", 5: "#6b7280" };
 
   return (
     <div className="report-layout">
@@ -640,16 +673,68 @@ function ShiftReportPanel({ user }) {
           <h2>Shift Handoff Report</h2>
           <p style={{ color: "#94a3b8", marginTop: 4 }}>HIPAA-compliant PDF for charge nurse handoff</p>
         </div>
-        <div style={{ display: "flex", gap: 10 }}>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
           <button className="scan-btn" onClick={() => handleGenerate("pdf")} disabled={generating} style={{ background: "#0d9488" }}>
             {generating ? "Generating…" : "⬇ Download PDF"}
           </button>
           <button className="refresh-btn" onClick={() => handleGenerate("json")} disabled={generating}>
             Save Report
           </button>
+          <button className="refresh-btn" onClick={() => setShowEmailInput(v => !v)} style={{ background: "#1e293b" }}>
+            ✉ Email Report
+          </button>
         </div>
       </div>
-      {msg && <div style={{ padding: "8px 12px", background: "#f0fdf4", color: "#15803d", borderRadius: 6, marginBottom: 12 }}>{msg}</div>}
+
+      {showEmailInput && (
+        <div style={{ display: "flex", gap: 10, marginBottom: 12, alignItems: "center" }}>
+          <input
+            style={{ flex: 1, padding: "8px 12px", background: "#0f1923", border: "1px solid #1e293b", borderRadius: 8, color: "#e2e8f0", fontSize: 13 }}
+            placeholder="Recipient email (leave blank for admin default)"
+            value={emailInput}
+            onChange={e => setEmailInput(e.target.value)}
+          />
+          <button className="scan-btn" onClick={handleEmail} disabled={emailing} style={{ background: "#0d9488", whiteSpace: "nowrap" }}>
+            {emailing ? "Sending…" : "Send →"}
+          </button>
+        </div>
+      )}
+
+      {msg && <div style={{ padding: "8px 12px", background: "#f0fdf410", color: "#4ade80", borderRadius: 6, marginBottom: 12, fontSize: 13 }}>{msg}</div>}
+
+      {/* Live preview of current shift */}
+      <div className="card" style={{ marginBottom: 20 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <h3 style={{ color: "#e2e8f0", fontSize: 14, fontWeight: 600, margin: 0 }}>Current Shift Preview</h3>
+          <span style={{ fontSize: 12, color: "#475569" }}>Live data · {new Date().toLocaleTimeString()}</span>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12, marginBottom: 20 }}>
+          {[
+            ["Total Patients", total, "#0d9488"],
+            ["Avg Wait", `${avgWait} min`, "#0284c7"],
+            ["Sepsis Alerts", sepsis, sepsis > 0 ? "#dc2626" : "#4ade80"],
+            ["BH Patients", bh, "#7c3aed"],
+            ["Admissions Predicted", admissions, "#f97316"],
+          ].map(([label, val, color]) => (
+            <div key={label} style={{ background: "#0a1520", borderRadius: 10, padding: "14px 10px", textAlign: "center", border: "1px solid #1e293b" }}>
+              <div style={{ fontSize: 24, fontWeight: 700, color }}>{val}</div>
+              <div style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>{label}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {esiCounts.filter(e => e.count > 0).map(e => (
+            <div key={e.level} style={{
+              padding: "5px 12px", borderRadius: 20, fontSize: 12, fontWeight: 600,
+              background: `${esiColors[e.level]}20`, color: esiColors[e.level],
+              border: `1px solid ${esiColors[e.level]}40`,
+            }}>
+              ESI {e.level}: {e.count}
+            </div>
+          ))}
+          {total === 0 && <span style={{ color: "#475569", fontSize: 12 }}>No active patients in queue</span>}
+        </div>
+      </div>
 
       {reports.length > 0 && (
         <div className="card" style={{ marginTop: 0 }}>
@@ -726,6 +811,7 @@ const PAGE_TITLES = {
   journeys:   "Clinical Journeys",
   audit:      "Audit Log",
   compliance: "Compliance Center",
+  billing:    "Billing",
 };
 
 const NAV_ITEMS = [
@@ -743,6 +829,7 @@ const STAFF_NAV = [
 const ADMIN_NAV = [
   { id: "audit",      icon: "🔒", label: "Audit Log" },
   { id: "compliance", icon: "🛡", label: "Compliance" },
+  { id: "billing",    icon: "💳", label: "Billing" },
 ];
 
 export default function App() {
@@ -768,6 +855,8 @@ export default function App() {
   const [journeyEscalations, setJourneyEscalations] = useState(0);
   const [soapModal, setSoapModal] = useState(null); // { patientId, patientName, note }
   const [soapLoading, setSoapLoading] = useState(false);
+  const [soapEditing, setSoapEditing] = useState(false);
+  const [soapEdits, setSoapEdits] = useState({});
 
   const addLog = (zone, message) => {
     const time = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -1316,7 +1405,8 @@ export default function App() {
 
         {activeTab === "analytics" && <OutcomesDashboard user={user} />}
         {activeTab === "beds" && <BedBoard user={user} />}
-        {activeTab === "report"     && <ShiftReportPanel user={user} />}
+        {activeTab === "report"     && <ShiftReportPanel user={user} queue={queue} />}
+        {activeTab === "billing"    && <BillingPage user={user} />}
         {activeTab === "audit"      && <AuditLogPanel user={user} />}
         {activeTab === "journeys"   && <ClinicalJourneys activeTab="journeys" />}
         {activeTab === "compliance" && <ClinicalJourneys activeTab="compliance" />}
@@ -1325,11 +1415,25 @@ export default function App() {
 
       {/* SOAP Note Modal */}
       {(soapModal || soapLoading) && (
-        <div className="soap-overlay" onClick={() => setSoapModal(null)}>
+        <div className="soap-overlay" onClick={() => { setSoapModal(null); setSoapEditing(false); setSoapEdits({}); }}>
           <div className="soap-modal" onClick={e => e.stopPropagation()}>
             <div className="soap-modal-header">
               <h2>📝 SOAP Note — {soapModal?.patientName}</h2>
-              <button className="soap-close" onClick={() => setSoapModal(null)}>✕</button>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                {soapModal?.note && !soapModal?.note?.finalized && (
+                  <button
+                    className="soap-copy-btn"
+                    style={{ padding: "4px 12px", fontSize: 12 }}
+                    onClick={() => {
+                      if (soapEditing) { setSoapEditing(false); setSoapEdits({}); }
+                      else { setSoapEditing(true); setSoapEdits({ ...soapModal.note }); }
+                    }}
+                  >
+                    {soapEditing ? "Cancel Edit" : "✏ Edit"}
+                  </button>
+                )}
+                <button className="soap-close" onClick={() => { setSoapModal(null); setSoapEditing(false); setSoapEdits({}); }}>✕</button>
+              </div>
             </div>
             {soapLoading ? (
               <div className="soap-loading">
@@ -1341,28 +1445,55 @@ export default function App() {
                 {["subjective", "objective", "assessment", "plan"].map(section => (
                   <div key={section} className="soap-section">
                     <div className="soap-section-title">{section.toUpperCase()}</div>
-                    <div className="soap-section-text">{soapModal.note[section]}</div>
+                    {soapEditing ? (
+                      <textarea
+                        className="soap-edit-textarea"
+                        value={soapEdits[section] ?? soapModal.note[section] ?? ""}
+                        onChange={e => setSoapEdits(prev => ({ ...prev, [section]: e.target.value }))}
+                        rows={4}
+                      />
+                    ) : (
+                      <div className="soap-section-text">{soapModal.note[section]}</div>
+                    )}
                   </div>
                 ))}
                 <div className="soap-meta">
-                  Generated by AI · {new Date(soapModal.note.generated_at).toLocaleString()} · Review before finalizing
+                  {soapModal.note.finalized
+                    ? `✓ Finalized by ${soapModal.note.finalized_by}`
+                    : `Generated by AI · ${new Date(soapModal.note.generated_at).toLocaleString()} · Review before finalizing`}
                 </div>
                 <div className="soap-actions">
-                  <button className="soap-copy-btn" onClick={() => {
-                    navigator.clipboard.writeText(soapModal.note.full_text);
-                    addToast({ level: "info", text: "SOAP note copied to clipboard" });
-                  }}>
-                    📋 Copy Full Note
-                  </button>
-                  {user?.role === "physician" && (
+                  {soapEditing ? (
+                    <button className="soap-finalize-btn" onClick={async () => {
+                      await fetch(`${API_BASE}/chart/note/${soapModal.patientId}`, {
+                        method: "PATCH",
+                        headers: { ...authHeaders(), "Content-Type": "application/json" },
+                        body: JSON.stringify(soapEdits),
+                      });
+                      setSoapModal(prev => ({ ...prev, note: { ...prev.note, ...soapEdits } }));
+                      setSoapEditing(false);
+                      setSoapEdits({});
+                      addToast({ level: "info", text: "SOAP note saved" });
+                    }}>
+                      💾 Save Changes
+                    </button>
+                  ) : (
+                    <button className="soap-copy-btn" onClick={() => {
+                      navigator.clipboard.writeText(soapModal.note.full_text);
+                      addToast({ level: "info", text: "SOAP note copied to clipboard" });
+                    }}>
+                      📋 Copy Full Note
+                    </button>
+                  )}
+                  {user?.role === "physician" && !soapModal?.note?.finalized && !soapEditing && (
                     <button className="soap-finalize-btn" onClick={async () => {
                       await fetch(`${API_BASE}/chart/note/${soapModal.patientId}/finalize`, {
                         method: "POST", headers: authHeaders(),
                       });
-                      addToast({ level: "info", text: "SOAP note finalized" });
-                      setSoapModal(null);
+                      setSoapModal(prev => ({ ...prev, note: { ...prev.note, finalized: true, finalized_by: user.username } }));
+                      addToast({ level: "info", text: "SOAP note finalized and signed" });
                     }}>
-                      ✓ Finalize Note
+                      ✓ Finalize & Sign
                     </button>
                   )}
                 </div>
