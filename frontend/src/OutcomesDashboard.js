@@ -142,6 +142,36 @@ function SepsisComponents({ components }) {
   );
 }
 
+// ── CSV export helper ─────────────────────────────────────────────────────────
+function exportCSV(data) {
+  const { trends_7d, esi_trends, timeseries } = data;
+
+  const rows = [["Report", "MediScan Gateway — Outcomes Export"], ["Generated", new Date().toISOString()], []];
+
+  rows.push(["--- 7-Day Volume Trends ---"]);
+  rows.push(["Date", "Patients", "Avg Wait (min)", "Avg LOS (min)", "LWBS Rate (%)"]);
+  (trends_7d || []).forEach(r => rows.push([r.date, r.patients, r.avg_wait_min, r.avg_los_min, r.lwbs_rate]));
+
+  rows.push([]);
+  rows.push(["--- 7-Day ESI Distribution ---"]);
+  rows.push(["Date", "ESI1", "ESI2", "ESI3", "ESI4", "ESI5"]);
+  (esi_trends || []).forEach(r => rows.push([r.date, r.ESI1, r.ESI2, r.ESI3, r.ESI4, r.ESI5]));
+
+  rows.push([]);
+  rows.push(["--- 24h Hourly Volume ---"]);
+  rows.push(["Time", "Patients", "Wait (min)"]);
+  (timeseries || []).forEach(r => rows.push([r.time, r.patients, r.wait_min]));
+
+  const csv = rows.map(r => r.map(v => `"${v ?? ""}"`).join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `mediscan-outcomes-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 // ── Main dashboard ────────────────────────────────────────────────────────────
 export default function OutcomesDashboard({ user }) {
   const [data, setData] = useState(null);
@@ -204,6 +234,9 @@ export default function OutcomesDashboard({ user }) {
           )}
         </div>
         <div className="dash-toolbar-right">
+          <button className="dash-export-btn" onClick={() => exportCSV(data)}>
+            ↓ Export CSV
+          </button>
           <button className="dash-export-btn" onClick={() => window.open(`${API_BASE}/report?format=pdf&token=${user?.token}`, "_blank")}>
             ↓ Export PDF
           </button>

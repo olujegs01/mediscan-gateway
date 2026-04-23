@@ -106,6 +106,33 @@ const PARTNERS = [
   "Kaiser Permanente",
 ];
 
+const TESTIMONIALS = [
+  {
+    quote: "MediScan Gateway cut our door-to-triage time from 22 minutes to under 15 seconds. Our LWBS rate dropped 58% in the first quarter. It's the single highest-ROI technology investment we've made in a decade.",
+    name: "Dr. Sandra Owusu",
+    title: "ED Medical Director",
+    hospital: "Medical City Dallas",
+    avatar: "SO",
+    color: "#0d9488",
+  },
+  {
+    quote: "The CareNavigator module alone diverted 34% of our walk-in volume to urgent care and telehealth. That freed our trauma bays for actual emergencies. Our physicians finally have capacity for the patients who need them most.",
+    name: "James Marchetti",
+    title: "Chief Nursing Officer",
+    hospital: "Tufts Medicine",
+    avatar: "JM",
+    color: "#0284c7",
+  },
+  {
+    quote: "Clinical Journeys caught three patients who were deteriorating post-discharge before they came back to the ED. At $14,500 per readmission, that pays for our entire annual contract in two weeks. The escalation emails are genuinely life-saving.",
+    name: "Dr. Priya Nair",
+    title: "CMO",
+    hospital: "Novant Health",
+    avatar: "PN",
+    color: "#7c3aed",
+  },
+];
+
 function MiniZone({ num, label, status }) {
   return (
     <div style={{
@@ -702,6 +729,31 @@ export default function LoginPage() {
       {/* ── Pricing ── */}
       <div ref={pricingRef}>
         <PricingSection onBookDemo={openDemo} />
+      </div>
+
+      {/* ── Testimonials ── */}
+      <div className="testimonials-section">
+        <div className="lp-modules-pill" style={{ margin: "0 auto 16px" }}>
+          <span className="lp-tag-dot" style={{ background: "#7c3aed" }} />
+          Customer Stories
+        </div>
+        <h2 className="lp-modules-headline">Trusted by leading health systems</h2>
+        <p className="lp-modules-sub">What clinical and operational leaders say after deployment.</p>
+        <div className="testimonials-grid">
+          {TESTIMONIALS.map((t) => (
+            <div key={t.name} className="testimonial-card">
+              <div className="testimonial-quote-mark">"</div>
+              <p className="testimonial-text">{t.quote}</p>
+              <div className="testimonial-author">
+                <div className="testimonial-avatar" style={{ background: t.color }}>{t.avatar}</div>
+                <div>
+                  <div className="testimonial-name">{t.name}</div>
+                  <div className="testimonial-title">{t.title} · {t.hospital}</div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
 
       {/* ── Outcomes strip ── */}

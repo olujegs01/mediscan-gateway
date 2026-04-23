@@ -23,6 +23,7 @@ USERS_DB = {
         "password_hash": bcrypt.hashpw(b"mediscan2026", bcrypt.gensalt()).decode(),
         "role": "admin",
         "name": "System Admin",
+        "hospital_id": "default",
         "mfa_secret": pyotp.random_base32(),
         "mfa_enabled": False,
     },
@@ -30,6 +31,7 @@ USERS_DB = {
         "password_hash": bcrypt.hashpw(b"nurse2026", bcrypt.gensalt()).decode(),
         "role": "nurse",
         "name": "Triage Nurse",
+        "hospital_id": "default",
         "mfa_secret": pyotp.random_base32(),
         "mfa_enabled": False,
     },
@@ -37,6 +39,7 @@ USERS_DB = {
         "password_hash": bcrypt.hashpw(b"physician2026", bcrypt.gensalt()).decode(),
         "role": "physician",
         "name": "On-Call Physician",
+        "hospital_id": "default",
         "mfa_secret": pyotp.random_base32(),
         "mfa_enabled": False,
     },
@@ -64,11 +67,13 @@ class MFASetupResponse(BaseModel):
     backup_codes: list[str]
 
 
-def create_token(username: str, role: str, mfa_verified: bool = False) -> str:
+def create_token(username: str, role: str, mfa_verified: bool = False,
+                 hospital_id: str = "default") -> str:
     payload = {
         "sub": username,
         "role": role,
         "mfa": mfa_verified,
+        "hospital_id": hospital_id,
         "exp": datetime.utcnow() + timedelta(hours=TOKEN_EXPIRE_HOURS),
         "iat": datetime.utcnow(),
     }
@@ -132,7 +137,8 @@ def login(data: LoginRequest) -> TokenResponse:
         if not totp.verify(data.totp_code, valid_window=1):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid MFA code")
 
-    token = create_token(data.username, user["role"], mfa_verified=mfa_enabled)
+    token = create_token(data.username, user["role"], mfa_verified=mfa_enabled,
+                         hospital_id=user.get("hospital_id", "default"))
     return TokenResponse(
         access_token=token,
         token_type="bearer",

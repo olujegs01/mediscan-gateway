@@ -23,11 +23,30 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
+class Hospital(Base):
+    __tablename__ = "hospitals"
+
+    id     = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    slug   = Column(String, unique=True, index=True)   # e.g. "general-hospital"
+    name   = Column(String)
+    city   = Column(String, nullable=True)
+    state  = Column(String, nullable=True)
+    contact_email = Column(String, nullable=True)
+    bed_count     = Column(Integer, nullable=True)
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+def _default_hospital():
+    return "default"
+
+
 class PatientRecord(Base):
     __tablename__ = "patients"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     patient_id = Column(String, unique=True, index=True)
+    hospital_id = Column(String, index=True, default=_default_hospital)
     name = Column(String)
     age = Column(Integer)
     phone = Column(String, nullable=True)
@@ -54,6 +73,7 @@ class AuditLog(Base):
     __tablename__ = "audit_logs"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    hospital_id = Column(String, index=True, default=_default_hospital)
     timestamp = Column(DateTime, default=datetime.utcnow)
     username = Column(String)
     role = Column(String)
@@ -68,6 +88,7 @@ class ShiftReport(Base):
     __tablename__ = "shift_reports"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    hospital_id = Column(String, index=True, default=_default_hospital)
     shift_start = Column(DateTime)
     shift_end = Column(DateTime, default=datetime.utcnow)
     generated_by = Column(String)
@@ -86,6 +107,7 @@ class Bed(Base):
     __tablename__ = "beds"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    hospital_id = Column(String, index=True, default=_default_hospital)
     unit = Column(String)           # Trauma Bay | Resuscitation | ED Main | Fast Track
     room = Column(String, unique=True)
     status = Column(String, default="available")  # available | occupied | boarding | cleaning
@@ -109,6 +131,7 @@ class ClinicalJourney(Base):
     __tablename__ = "clinical_journeys"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    hospital_id = Column(String, index=True, default=_default_hospital)
     patient_id = Column(String, index=True)
     name = Column(String)
     phone = Column(String, nullable=True)
@@ -148,6 +171,7 @@ class SOAPNote(Base):
     __tablename__ = "soap_notes"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    hospital_id = Column(String, index=True, default=_default_hospital)
     patient_id = Column(String, index=True)
     generated_at = Column(DateTime, default=datetime.utcnow)
     generated_by = Column(String, default="AI")

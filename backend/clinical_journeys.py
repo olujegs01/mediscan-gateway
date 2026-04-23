@@ -128,6 +128,17 @@ def process_sms_response(db: Session, from_phone: str, message: str) -> dict | N
     db.commit()
 
     if worsening:
+        try:
+            from email_service import notify_journey_escalation
+            notify_journey_escalation(
+                patient_name=journey.name,
+                esi_level=journey.esi_level,
+                phone=journey.phone,
+                reason=journey.escalated_reason,
+                portal_token=journey.portal_token,
+            )
+        except Exception as e:
+            print(f"[Email] Escalation notification failed: {e}")
         return {
             "journey_id": journey.id,
             "patient_id": journey.patient_id,

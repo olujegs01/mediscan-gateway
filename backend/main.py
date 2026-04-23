@@ -45,7 +45,8 @@ from compliance import (
     seed_escalation_rules, generate_baa_pdf,
 )
 from demo_seeder import seed_demo_data
-from database import DemoRequest, ClinicalJourney as ClinicalJourneyModel
+from database import DemoRequest, ClinicalJourney as ClinicalJourneyModel, Hospital
+from email_service import notify_demo_request, notify_journey_escalation
 
 app = FastAPI(title="MediScan Gateway API", version="2.0")
 
@@ -712,6 +713,39 @@ def public_stats(db: Session = Depends(get_db)):
     }
 
 
+# ── Hospitals (multi-tenant) ──────────────────────────────────────────────────
+
+class HospitalBody(PydanticBase):
+    slug: str
+    name: str
+    city: str | None = None
+    state: str | None = None
+    contact_email: str | None = None
+    bed_count: int | None = None
+
+
+@app.get("/hospitals")
+def list_hospitals(token: dict = Depends(require_role("admin")), db: Session = Depends(get_db)):
+    return [
+        {"id": h.id, "slug": h.slug, "name": h.name, "city": h.city,
+         "state": h.state, "bed_count": h.bed_count, "active": h.active,
+         "created_at": h.created_at.isoformat()}
+        for h in db.query(Hospital).order_by(Hospital.created_at.desc()).all()
+    ]
+
+
+@app.post("/hospitals")
+def create_hospital(body: HospitalBody, token: dict = Depends(require_role("admin")),
+                    db: Session = Depends(get_db)):
+    if db.query(Hospital).filter_by(slug=body.slug).first():
+        raise HTTPException(status_code=400, detail="Hospital slug already exists")
+    h = Hospital(slug=body.slug, name=body.name, city=body.city, state=body.state,
+                 contact_email=body.contact_email, bed_count=body.bed_count)
+    db.add(h)
+    db.commit()
+    return {"id": h.id, "slug": h.slug, "name": h.name}
+
+
 # ── Demo Request (lead capture) ───────────────────────────────────────────────
 
 class DemoRequestBody(PydanticBase):
@@ -735,6 +769,11 @@ def submit_demo_request(body: DemoRequestBody, db: Session = Depends(get_db)):
     )
     db.add(req)
     db.commit()
+    # Fire-and-forget email — don't block response on email failure
+    try:
+        notify_demo_request(body.name, body.hospital, body.role, body.email, body.bed_count, body.message)
+    except Exception as e:
+        print(f"[Email] Demo request notification failed: {e}")
     return {"success": True, "message": "Demo request received — we'll be in touch within 24 hours."}
 
 
