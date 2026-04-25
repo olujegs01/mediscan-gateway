@@ -6,9 +6,45 @@ pre-arrival ED handoff, voice/image input support.
 """
 import os
 import json
+import hashlib
+import time
 import anthropic
 
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+# ── Assessment cache — avoids re-running identical inputs ─────────────────────
+_assessment_cache: dict = {}      # key → {"result": dict, "expires": float}
+_CACHE_TTL_SECONDS = 1800         # 30-minute TTL; identical symptom inputs share result
+
+
+def _cache_key(age: int, sex: str, symptoms: str, risk_factors: list, qa_history: list) -> str:
+    raw = f"{age}|{sex}|{symptoms.strip().lower()}|{','.join(sorted(risk_factors))}|{json.dumps(qa_history, sort_keys=True)}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _adaptive_budget(symptoms: str, risk_factors: list, qa_history: list) -> int:
+    """Scale thinking budget by case complexity to minimize token burn."""
+    complexity = 0
+    sym_lower = symptoms.lower()
+    # High-acuity keywords → maximum reasoning
+    high_acuity = ["chest pain", "shortness of breath", "stroke", "seizure", "unconscious",
+                   "severe", "worst headache", "blood", "pregnant", "cardiac", "sepsis"]
+    if any(k in sym_lower for k in high_acuity):
+        complexity += 3
+    # Each risk factor adds complexity
+    complexity += min(len(risk_factors), 4)
+    # Q&A history means second-pass — needs deeper synthesis
+    if qa_history:
+        complexity += 2
+    # Long symptom description → more complexity
+    if len(symptoms) > 200:
+        complexity += 1
+
+    if complexity >= 5:
+        return 3000   # complex: full reasoning budget
+    if complexity >= 2:
+        return 1500   # moderate
+    return 800        # simple
 
 CARE_LEVELS = {
     "CALL_911": {
@@ -168,12 +204,19 @@ def run_assessment(
     language: str = "English",
 ) -> dict:
     """Synchronous single-call assessment. Returns parsed JSON dict."""
+    # Cache check — skip AI call for identical inputs within TTL
+    ck = _cache_key(age, sex, symptoms, risk_factors, qa_history)
+    cached = _assessment_cache.get(ck)
+    if cached and cached["expires"] > time.time():
+        return cached["result"]
+
+    budget = _adaptive_budget(symptoms, risk_factors, qa_history)
     prompt = build_assessment_prompt(age, sex, symptoms, risk_factors, qa_history, ed_occupancy_pct, language)
     try:
         response = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=1500,
-            thinking={"type": "enabled", "budget_tokens": 800},
+            max_tokens=max(1500, budget),
+            thinking={"type": "enabled", "budget_tokens": budget},
             messages=[{"role": "user", "content": prompt}],
         )
         text = next((b.text for b in response.content if hasattr(b, "text")), "{}")
@@ -188,6 +231,16 @@ def run_assessment(
         if result.get("status") == "complete":
             level = result.get("care_level", "SELF_CARE")
             result["care_level_meta"] = CARE_LEVELS.get(level, CARE_LEVELS["SELF_CARE"])
+
+        # Cache result (don't cache needs_info — those are stateful)
+        if result.get("status") == "complete":
+            _assessment_cache[ck] = {"result": result, "expires": time.time() + _CACHE_TTL_SECONDS}
+            # Prune cache if it grows large
+            if len(_assessment_cache) > 500:
+                now = time.time()
+                expired = [k for k, v in _assessment_cache.items() if v["expires"] < now]
+                for k in expired:
+                    _assessment_cache.pop(k, None)
 
         return result
     except Exception as e:

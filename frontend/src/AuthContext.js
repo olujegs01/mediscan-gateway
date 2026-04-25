@@ -1,30 +1,64 @@
-import { createContext, useContext, useState, useEffect, useCallback } from "react";
+import { createContext, useContext, useState, useEffect, useCallback, useRef } from "react";
 
 const API_BASE = process.env.REACT_APP_API_URL || "http://localhost:8000";
 const AuthContext = createContext(null);
 
-const TOKEN_VALIDATE_TIMEOUT_MS = 8000; // Render free tier needs up to ~30s cold start; we abort at 8s and clear the token
+const TOKEN_VALIDATE_TIMEOUT_MS = 8000;
+const REFRESH_BEFORE_EXPIRY_MS = 5 * 60 * 1000; // refresh 5 min before expiry
+
+function decodeTokenPayload(token) {
+  try {
+    return JSON.parse(atob(token.split(".")[1]));
+  } catch {
+    return null;
+  }
+}
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [warming, setWarming] = useState(false);
+  const refreshTimerRef = useRef(null);
 
   const logout = useCallback(() => {
+    clearTimeout(refreshTimerRef.current);
     localStorage.removeItem("mediscan_token");
     setUser(null);
   }, []);
 
-  // Validate stored token on load — with timeout so a sleeping Render instance
-  // doesn't leave the app stuck on the loading spinner forever.
+  const scheduleRefresh = useCallback((token) => {
+    clearTimeout(refreshTimerRef.current);
+    const payload = decodeTokenPayload(token);
+    if (!payload?.exp) return;
+
+    const expiresAt = payload.exp * 1000;
+    const delay = Math.max(10_000, expiresAt - Date.now() - REFRESH_BEFORE_EXPIRY_MS);
+
+    refreshTimerRef.current = setTimeout(async () => {
+      try {
+        const res = await fetch(`${API_BASE}/auth/refresh`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) { logout(); return; }
+        const data = await res.json();
+        const newToken = data.access_token;
+        localStorage.setItem("mediscan_token", newToken);
+        setUser(prev => prev ? { ...prev, token: newToken } : prev);
+        scheduleRefresh(newToken);
+      } catch {
+        // Network blip — token still valid; will retry on next page load
+      }
+    }, delay);
+  }, [logout]);
+
+  // Validate stored token on load
   useEffect(() => {
     const token = localStorage.getItem("mediscan_token");
     if (!token) { setLoading(false); return; }
 
     const controller = new AbortController();
-    // After 2.5s still loading → show "warming up" message
     const warmTimer = setTimeout(() => setWarming(true), 2500);
-    // Hard abort at 8s → treat as logged-out
     const killTimer = setTimeout(() => controller.abort(), TOKEN_VALIDATE_TIMEOUT_MS);
 
     fetch(`${API_BASE}/auth/me`, {
@@ -32,7 +66,10 @@ export function AuthProvider({ children }) {
       signal: controller.signal,
     })
       .then(r => r.ok ? r.json() : Promise.reject())
-      .then(data => setUser({ ...data, token }))
+      .then(data => {
+        setUser({ ...data, token });
+        scheduleRefresh(token);
+      })
       .catch(logout)
       .finally(() => {
         clearTimeout(warmTimer);
@@ -46,7 +83,7 @@ export function AuthProvider({ children }) {
       clearTimeout(killTimer);
       controller.abort();
     };
-  }, [logout]);
+  }, [logout, scheduleRefresh]);
 
   const login = async (username, password, totp_code = undefined) => {
     const res = await fetch(`${API_BASE}/auth/login`, {
@@ -62,6 +99,7 @@ export function AuthProvider({ children }) {
     if (data.mfa_required) return data;
     localStorage.setItem("mediscan_token", data.access_token);
     setUser({ username, role: data.role, name: data.name, token: data.access_token });
+    scheduleRefresh(data.access_token);
     return data;
   };
 

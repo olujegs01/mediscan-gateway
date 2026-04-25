@@ -16,7 +16,18 @@ if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine_kwargs = {"poolclass": StaticPool} if DATABASE_URL.startswith("sqlite") else {"pool_pre_ping": True}
+
+if DATABASE_URL.startswith("sqlite"):
+    engine_kwargs = {"poolclass": StaticPool}
+else:
+    # Production PostgreSQL: connection pool tuned for FastAPI concurrency
+    engine_kwargs = {
+        "pool_pre_ping": True,      # detects stale connections before use
+        "pool_size": 10,            # keep 10 connections warm
+        "max_overflow": 20,         # up to 30 total under load
+        "pool_timeout": 30,         # wait up to 30s for a connection
+        "pool_recycle": 1800,       # recycle connections every 30 min
+    }
 
 engine = create_engine(DATABASE_URL, connect_args=connect_args, **engine_kwargs)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -225,6 +236,24 @@ class DemoRequest(Base):
     bed_count = Column(Integer, nullable=True)
     message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class StaffUser(Base):
+    __tablename__ = "staff_users"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    hospital_id = Column(String, index=True, default=_default_hospital)
+    username = Column(String, unique=True, index=True)
+    password_hash = Column(String)
+    role = Column(String)           # admin | nurse | physician
+    name = Column(String)
+    email = Column(String, nullable=True)
+    active = Column(Boolean, default=True)
+    mfa_secret = Column(String, nullable=True)
+    mfa_enabled = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_login = Column(DateTime, nullable=True)
+    created_by = Column(String, nullable=True)
 
 
 def seed_beds(db):

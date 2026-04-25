@@ -990,3 +990,334 @@
 }
 
 .sc-footer a:hover { text-decoration: underline; }
+
+/* ── Trust strip (welcome screen) ────────────────────────────────────────── */
+
+.sc-trust-strip {
+  display: flex;
+  gap: 0;
+  margin: 0 0 28px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+.sc-trust-stat {
+  flex: 1;
+  padding: 14px 10px;
+  text-align: center;
+  border-right: 1px solid #e2e8f0;
+}
+
+.sc-trust-stat:last-child { border-right: none; }
+
+.sc-trust-number {
+  font-size: 22px;
+  font-weight: 800;
+  color: #0d9488;
+  line-height: 1;
+  margin-bottom: 4px;
+}
+
+.sc-trust-label {
+  font-size: 10px;
+  color: #64748b;
+  line-height: 1.3;
+}
+
+/* ── Categorized symptom chips ────────────────────────────────────────────── */
+
+.sc-category-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sc-cat-group {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.sc-cat-label {
+  width: 100%;
+  padding: 10px 14px;
+  background: #f8fafc;
+  border: none;
+  text-align: left;
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: background 0.15s;
+}
+
+.sc-cat-label:hover { background: #f1f5f9; }
+.sc-cat-label.open { background: #f0fdfa; color: #0d9488; }
+
+.sc-cat-arrow {
+  margin-left: auto;
+  font-size: 10px;
+  color: #94a3b8;
+}
+
+.sc-cat-symptoms {
+  padding: 10px 12px 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  border-top: 1px solid #e2e8f0;
+  background: #ffffff;
+}
+
+/* ── Urgency pulse animation ─────────────────────────────────────────────── */
+
+@keyframes urgency-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.4); }
+  50% { box-shadow: 0 0 0 8px rgba(220, 38, 38, 0); }
+}
+
+.sc-result-badge--urgent {
+  animation: urgency-pulse 2s infinite;
+}
+
+@keyframes icon-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.15); }
+}
+
+.sc-result-icon--pulse {
+  animation: icon-pulse 1.5s infinite;
+  display: inline-block;
+}
+
+/* ── ED Handoff card ─────────────────────────────────────────────────────── */
+
+.sc-ed-handoff {
+  margin: 16px 0;
+  padding: 16px 18px;
+  border: 2px solid;
+  border-radius: 12px;
+  background: #fffbeb;
+}
+
+.sc-ed-handoff-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 8px;
+}
+
+.sc-ed-handoff-text {
+  font-size: 15px;
+  color: #1e293b;
+  font-style: italic;
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* ── Clinical scores grid ────────────────────────────────────────────────── */
+
+.sc-clinical-scores {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.sc-scores-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.sc-score-item {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sc-score-name {
+  font-size: 11px;
+  color: #64748b;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.sc-score-val {
+  font-size: 15px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+/* ── Medications to avoid ────────────────────────────────────────────────── */
+
+.sc-meds-avoid {
+  border: 1px solid #fde68a;
+  border-radius: 12px;
+  padding: 16px;
+  background: #fffbeb;
+}
+
+.sc-meds-avoid h3 { color: #92400e; }
+
+.sc-meds-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.sc-meds-list li {
+  font-size: 14px;
+  color: #78350f;
+  margin-bottom: 4px;
+  line-height: 1.4;
+}
+
+/* ── Secondary result actions ────────────────────────────────────────────── */
+
+.sc-result-secondary-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+/* ── Print styles ────────────────────────────────────────────────────────── */
+
+@media print {
+  .sc-header, .sc-footer, .sc-result-actions, .sc-emergency-banner { display: none !important; }
+  .sc-root { background: #fff; }
+  .sc-card { box-shadow: none; border: none; }
+  .sc-result-badge--urgent { animation: none !important; box-shadow: none !important; }
+}
+
+/* ── Mobile responsive updates ───────────────────────────────────────────── */
+
+@media (max-width: 480px) {
+  .sc-trust-strip { flex-wrap: wrap; }
+  .sc-trust-stat { flex: 1 0 45%; border-bottom: 1px solid #e2e8f0; }
+  .sc-scores-grid { grid-template-columns: repeat(2, 1fr); }
+  .sc-result-secondary-actions { flex-direction: column; }
+}
+
+/* ── Returning patient / revisit banner ──────────────────────────────────── */
+
+.sc-revisit-banner {
+  margin: 0 0 16px;
+  padding: 14px 16px;
+  background: #f0fdfa;
+  border: 1px solid #99f6e4;
+  border-radius: 10px;
+}
+
+.sc-revisit-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #0d9488;
+  margin-bottom: 4px;
+}
+
+.sc-revisit-sub {
+  font-size: 12px;
+  color: #475569;
+  margin: 0 0 10px;
+}
+
+.sc-revisit-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sc-revisit-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.sc-revisit-date {
+  color: #64748b;
+  white-space: nowrap;
+  min-width: 72px;
+}
+
+.sc-revisit-complaint {
+  color: #334155;
+  flex: 1;
+}
+
+.sc-revisit-esi {
+  font-weight: 700;
+  color: #0d9488;
+  white-space: nowrap;
+}
+
+/* ── Photo upload ─────────────────────────────────────────────────────────── */
+
+.sc-photo-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.sc-photo-btn {
+  padding: 8px 16px;
+  border: 1px dashed #94a3b8;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sc-photo-btn:hover:not(:disabled) {
+  border-color: #0d9488;
+  background: #f0fdfa;
+  color: #0d9488;
+}
+
+.sc-photo-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.sc-photo-thumb {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 2px solid #e2e8f0;
+}
+
+.sc-photo-desc {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: #f0fdfa;
+  border: 1px solid #99f6e4;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #134e4a;
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  line-height: 1.5;
+}
+
+.sc-photo-desc-icon { flex-shrink: 0; }

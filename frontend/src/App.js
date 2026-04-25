@@ -5,6 +5,7 @@ import { useWebSocket } from "./hooks/useWebSocket";
 import ClinicalJourneys from "./ClinicalJourneys";
 import OutcomesDashboard from "./OutcomesDashboard";
 import BillingPage from "./BillingPage";
+import StaffPage from "./StaffPage";
 
 const WS_BASE = API_BASE.replace(/^https/, "wss").replace(/^http/, "ws");
 
@@ -910,6 +911,7 @@ const COMPLAINT_CATEGORIES = {
 const PAGE_TITLES = {
   scanner:    "Patient Scanner",
   queue:      "ER Queue",
+  staff:      "Staff Management",
   analytics:  "Command Dashboard",
   beds:       "Bed Board",
   report:     "Shift Report",
@@ -932,6 +934,7 @@ const STAFF_NAV = [
 ];
 
 const ADMIN_NAV = [
+  { id: "staff",      icon: "👥", label: "Staff" },
   { id: "audit",      icon: "🔒", label: "Audit Log" },
   { id: "compliance", icon: "🛡", label: "Compliance" },
   { id: "billing",    icon: "💳", label: "Billing" },
@@ -1527,6 +1530,7 @@ export default function App() {
         {activeTab === "analytics" && <OutcomesDashboard user={user} />}
         {activeTab === "beds" && <BedBoard user={user} addToast={addToast} />}
         {activeTab === "report"     && <ShiftReportPanel user={user} queue={queue} />}
+        {activeTab === "staff"      && <StaffPage user={user} />}
         {activeTab === "billing"    && <BillingPage user={user} />}
         {activeTab === "audit"      && <AuditLogPanel user={user} />}
         {activeTab === "journeys"   && <ClinicalJourneys activeTab="journeys" />}
@@ -1616,6 +1620,17 @@ export default function App() {
                     }}>
                       ✓ Finalize & Sign
                     </button>
+                  )}
+                  {!soapEditing && (
+                    <a
+                      href={`${API_BASE}/chart/note/${soapModal?.patientId}/pdf?token=${user?.token}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="soap-copy-btn"
+                      style={{ padding: "4px 12px", fontSize: 12, textDecoration: "none" }}
+                    >
+                      📥 Download PDF
+                    </a>
                   )}
                 </div>
               </div>

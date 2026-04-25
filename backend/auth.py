@@ -17,7 +17,8 @@ TOKEN_EXPIRE_HOURS = 12
 
 security = HTTPBearer()
 
-# Production: move to DB + proper identity provider (Auth0/Okta)
+# Fallback defaults — used when DB is unavailable or username not found in DB.
+# These are overridden if a matching StaffUser row exists in the DB.
 USERS_DB = {
     "admin": {
         "password_hash": bcrypt.hashpw(b"mediscan2026", bcrypt.gensalt()).decode(),
@@ -44,6 +45,27 @@ USERS_DB = {
         "mfa_enabled": False,
     },
 }
+
+
+def _get_user(username: str, db=None) -> Optional[dict]:
+    """DB-first lookup; falls back to in-memory USERS_DB."""
+    if db is not None:
+        try:
+            from database import StaffUser
+            row = db.query(StaffUser).filter_by(username=username, active=True).first()
+            if row:
+                return {
+                    "password_hash": row.password_hash,
+                    "role": row.role,
+                    "name": row.name,
+                    "hospital_id": row.hospital_id or "default",
+                    "mfa_secret": row.mfa_secret or pyotp.random_base32(),
+                    "mfa_enabled": bool(row.mfa_enabled),
+                    "_db_row": row,
+                }
+        except Exception:
+            pass
+    return USERS_DB.get(username)
 
 
 class LoginRequest(BaseModel):
@@ -81,7 +103,6 @@ def create_token(username: str, role: str, mfa_verified: bool = False,
 
 
 def create_pre_mfa_token(username: str) -> str:
-    """Short-lived token issued after password check, before MFA verification."""
     payload = {
         "sub": username,
         "scope": "pre_mfa",
@@ -110,19 +131,25 @@ def require_role(*roles):
     return checker
 
 
-def login(data: LoginRequest) -> TokenResponse:
-    user = USERS_DB.get(data.username)
+def login(data: LoginRequest, db=None) -> TokenResponse:
+    user = _get_user(data.username, db)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     if not bcrypt.checkpw(data.password.encode(), user["password_hash"].encode()):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
+    # Update last_login in DB if this is a DB user
+    if db and user.get("_db_row"):
+        try:
+            user["_db_row"].last_login = datetime.utcnow()
+            db.commit()
+        except Exception:
+            pass
+
     mfa_enabled = user.get("mfa_enabled", False)
 
-    # If MFA is enabled, verify TOTP code
     if mfa_enabled:
         if not data.totp_code:
-            # Password correct but MFA needed — return pre-MFA token
             pre_token = create_pre_mfa_token(data.username)
             return TokenResponse(
                 access_token=pre_token,
@@ -132,7 +159,6 @@ def login(data: LoginRequest) -> TokenResponse:
                 mfa_required=True,
                 mfa_enabled=True,
             )
-        # Verify TOTP
         totp = pyotp.TOTP(user["mfa_secret"])
         if not totp.verify(data.totp_code, valid_window=1):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid MFA code")
@@ -149,16 +175,14 @@ def login(data: LoginRequest) -> TokenResponse:
     )
 
 
-def setup_mfa(username: str) -> MFASetupResponse:
-    user = USERS_DB.get(username)
+def setup_mfa(username: str, db=None) -> MFASetupResponse:
+    user = _get_user(username, db)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
     secret = user["mfa_secret"]
-    app_name = "MediScan Gateway"
-    totp_uri = pyotp.totp.TOTP(secret).provisioning_uri(name=username, issuer_name=app_name)
+    totp_uri = pyotp.totp.TOTP(secret).provisioning_uri(name=username, issuer_name="MediScan Gateway")
 
-    # Generate QR code
     qr = qrcode.QRCode(version=1, box_size=6, border=2)
     qr.add_data(totp_uri)
     qr.make(fit=True)
@@ -166,19 +190,43 @@ def setup_mfa(username: str) -> MFASetupResponse:
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     qr_b64 = base64.b64encode(buf.getvalue()).decode()
-
-    # Backup codes
     backup_codes = [pyotp.random_base32()[:8].lower() for _ in range(8)]
 
     return MFASetupResponse(secret=secret, qr_code_base64=qr_b64, backup_codes=backup_codes)
 
 
-def enable_mfa(username: str, totp_code: str) -> bool:
-    user = USERS_DB.get(username)
+def enable_mfa(username: str, totp_code: str, db=None) -> bool:
+    user = _get_user(username, db)
     if not user:
         return False
     totp = pyotp.TOTP(user["mfa_secret"])
-    if totp.verify(totp_code, valid_window=1):
-        user["mfa_enabled"] = True
-        return True
-    return False
+    if not totp.verify(totp_code, valid_window=1):
+        return False
+
+    # Persist to DB row if available
+    if db and user.get("_db_row"):
+        try:
+            user["_db_row"].mfa_enabled = True
+            db.commit()
+        except Exception:
+            pass
+    else:
+        # Fall back to in-memory for default users
+        if username in USERS_DB:
+            USERS_DB[username]["mfa_enabled"] = True
+    return True
+
+
+def disable_mfa(username: str, db=None) -> bool:
+    user = _get_user(username, db)
+    if not user:
+        return False
+    if db and user.get("_db_row"):
+        try:
+            user["_db_row"].mfa_enabled = False
+            db.commit()
+        except Exception:
+            return False
+    elif username in USERS_DB:
+        USERS_DB[username]["mfa_enabled"] = False
+    return True

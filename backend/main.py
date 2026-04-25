@@ -5,7 +5,7 @@ from typing import List
 import os as _os
 from collections import defaultdict
 
-from fastapi import FastAPI, Depends, Query, HTTPException, status, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Depends, Query, HTTPException, status, Request, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
 import jwt as pyjwt
@@ -18,9 +18,9 @@ from notifications import generate_wristband, send_phone_push, send_family_alert
 from alerts import notify_physician
 from auth import (
     LoginRequest, TokenResponse, verify_token, require_role, login,
-    SECRET_KEY, ALGORITHM, setup_mfa, enable_mfa,
+    SECRET_KEY, ALGORITHM, setup_mfa, enable_mfa, disable_mfa, create_token, _get_user,
 )
-from database import init_db, get_db
+from database import init_db, get_db, StaffUser
 from patient_store import (
     upsert_patient, load_active_patients, discharge_patient_db,
     clear_all_active, get_audit_logs, save_shift_report, get_shift_reports, write_audit,
@@ -87,6 +87,11 @@ _login_attempts: dict = defaultdict(lambda: {"count": 0, "window_start": datetim
 _MAX_LOGIN_ATTEMPTS = 10
 _LOGIN_WINDOW_SECONDS = 900
 
+# CareNavigator rate limit: max 15 assessments per IP per hour (token burn protection)
+_assess_rate: dict = defaultdict(lambda: {"count": 0, "window_start": datetime.utcnow()})
+_MAX_ASSESS_PER_HOUR = 15
+_ASSESS_WINDOW_SECONDS = 3600
+
 
 async def _auto_generate_soap(patient_id: str, patient_data: dict):
     """Background: generate SOAP note immediately after scan so it's ready when nurse opens it."""
@@ -136,7 +141,7 @@ er_queue: List[dict] = []
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 @app.post("/auth/login", response_model=TokenResponse)
-def auth_login(data: LoginRequest, request: Request):
+def auth_login(data: LoginRequest, request: Request, db: Session = Depends(get_db)):
     client_ip = (request.client.host if request.client else "unknown")[:45]
     now = datetime.utcnow()
     rec = _login_attempts[client_ip]
@@ -150,7 +155,7 @@ def auth_login(data: LoginRequest, request: Request):
             detail=f"Too many failed login attempts. Try again in {int((_LOGIN_WINDOW_SECONDS - window_age) / 60) + 1} minutes.",
         )
     try:
-        result = login(data)
+        result = login(data, db)
         rec["count"] = 0  # reset on success
         return result
     except HTTPException as exc:
@@ -164,16 +169,36 @@ def auth_me(token: dict = Depends(verify_token)):
     return {"username": token["sub"], "role": token["role"]}
 
 
+@app.post("/auth/refresh")
+def auth_refresh(token: dict = Depends(verify_token)):
+    """Issue a fresh token with reset expiry — call 5 min before expiry."""
+    new_token = create_token(
+        token["sub"], token["role"],
+        mfa_verified=token.get("mfa", False),
+        hospital_id=token.get("hospital_id", "default"),
+    )
+    return {"access_token": new_token, "token_type": "bearer"}
+
+
 @app.get("/auth/mfa/setup")
-def mfa_setup(token: dict = Depends(verify_token)):
-    return setup_mfa(token["sub"])
+def mfa_setup(token: dict = Depends(verify_token), db: Session = Depends(get_db)):
+    return setup_mfa(token["sub"], db)
 
 
 @app.post("/auth/mfa/enable")
-def mfa_enable(code: str = Query(...), token: dict = Depends(verify_token)):
-    if not enable_mfa(token["sub"], code):
+def mfa_enable(code: str = Query(...), token: dict = Depends(verify_token),
+               db: Session = Depends(get_db)):
+    if not enable_mfa(token["sub"], code, db):
         raise HTTPException(status_code=400, detail="Invalid TOTP code")
     return {"mfa_enabled": True}
+
+
+@app.post("/auth/mfa/disable")
+def mfa_disable(token: dict = Depends(require_role("admin")),
+                username: str = Query(...), db: Session = Depends(get_db)):
+    if not disable_mfa(username, db):
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"mfa_disabled": True, "username": username}
 
 
 @app.get("/auth/fhir_status")
@@ -331,18 +356,42 @@ class PreRegisterRequest(PydanticBase):
 
 
 @app.post("/check/assess")
-def check_assess(body: CheckAssessRequest):
+def check_assess(body: CheckAssessRequest, request: Request, db: Session = Depends(get_db)):
     """Public endpoint — AI symptom triage. No PHI stored. Returns care level recommendation."""
     if not body.symptoms or len(body.symptoms.strip()) < 5:
         raise HTTPException(status_code=400, detail="Please describe your symptoms")
     if body.age < 0 or body.age > 120:
         raise HTTPException(status_code=400, detail="Invalid age")
+
+    # Rate limit: prevent token burn from bots / repeated submissions
+    client_ip = (request.client.host if request.client else "unknown")[:45]
+    now = datetime.utcnow()
+    rec = _assess_rate[client_ip]
+    window_age = (now - rec["window_start"]).total_seconds()
+    if window_age > _ASSESS_WINDOW_SECONDS:
+        rec["count"] = 0
+        rec["window_start"] = now
+    if rec["count"] >= _MAX_ASSESS_PER_HOUR:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Assessment limit reached ({_MAX_ASSESS_PER_HOUR}/hour). Please wait before trying again.",
+        )
+    rec["count"] += 1
+
+    # Real ED occupancy — wire bed board data into CareNavigator capacity routing
+    try:
+        bed_summary = get_bed_summary(db)
+        ed_occupancy_pct = bed_summary.get("occupancy_pct", 0)
+    except Exception:
+        ed_occupancy_pct = 0
+
     result = run_assessment(
         age=body.age,
         sex=body.sex,
         symptoms=body.symptoms,
         risk_factors=body.risk_factors,
         qa_history=body.qa_history,
+        ed_occupancy_pct=ed_occupancy_pct,
         language=body.language,
     )
     return result
@@ -352,6 +401,27 @@ def check_assess(body: CheckAssessRequest):
 def check_pre_register(body: PreRegisterRequest, db: Session = Depends(get_db)):
     """Pre-arrival ED registration — creates an 'incoming' entry visible to staff."""
     import uuid
+    from database import PatientRecord
+
+    # Revisit detection — check if this phone number has been here before
+    prior_visits = []
+    is_revisit = False
+    if body.phone and len(body.phone.strip()) >= 7:
+        prior = db.query(PatientRecord).filter(
+            PatientRecord.phone == body.phone.strip(),
+            PatientRecord.status == "discharged",
+        ).order_by(PatientRecord.timestamp.desc()).limit(3).all()
+        if prior:
+            is_revisit = True
+            prior_visits = [
+                {
+                    "patient_id": p.patient_id,
+                    "chief_complaint": p.chief_complaint,
+                    "esi_level": p.esi_level,
+                    "date": p.discharged_at.isoformat() if p.discharged_at else p.timestamp.isoformat(),
+                }
+                for p in prior
+            ]
 
     # Map care_level to ESI
     level_to_esi = {
@@ -415,6 +485,8 @@ def check_pre_register(body: PreRegisterRequest, db: Session = Depends(get_db)):
         "care_level": body.care_level,
         "care_label": meta["label"],
         "esi_level": esi,
+        "is_revisit": is_revisit,
+        "prior_visits": prior_visits,
     }
 
 
@@ -623,6 +695,28 @@ def finalize_chart_note(
     if not ok:
         raise HTTPException(status_code=404, detail="SOAP note not found")
     return {"finalized": True, "by": token["sub"]}
+
+
+@app.get("/chart/note/{patient_id}/pdf")
+def download_soap_pdf(
+    patient_id: str,
+    _: dict = Depends(verify_query_token),
+    db: Session = Depends(get_db),
+):
+    """Download SOAP note as a formatted PDF."""
+    note = get_soap_note(db, patient_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="No SOAP note found for this patient")
+    patient = next((p for p in er_queue if p["patient_id"] == patient_id), None)
+    patient_name = patient["name"] if patient else patient_id
+    from soap_pdf import generate_soap_pdf
+    pdf_bytes = generate_soap_pdf(note, patient_name)
+    filename = f"SOAP_{patient_id}_{datetime.utcnow().strftime('%Y%m%d')}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ── Clinical Journeys (post-discharge follow-up) ──────────────────────────────
@@ -1345,3 +1439,153 @@ def billing_status(db: Session = Depends(get_db)):
             "created_at": sub.created_at.isoformat(),
         } if sub else None,
     }
+
+
+# ── Staff user management (admin only) ───────────────────────────────────────
+
+class CreateStaffBody(PydanticBase):
+    username: str
+    password: str
+    role: str       # admin | nurse | physician
+    name: str
+    email: str = None
+
+
+class UpdateStaffBody(PydanticBase):
+    active: bool = None
+    role: str = None
+    name: str = None
+    email: str = None
+
+
+@app.get("/admin/users")
+def list_staff(token: dict = Depends(require_role("admin")), db: Session = Depends(get_db)):
+    rows = db.query(StaffUser).order_by(StaffUser.created_at.desc()).all()
+    result = [
+        {
+            "username": r.username, "role": r.role, "name": r.name,
+            "email": r.email, "active": r.active,
+            "mfa_enabled": r.mfa_enabled,
+            "created_at": r.created_at.isoformat(),
+            "last_login": r.last_login.isoformat() if r.last_login else None,
+            "created_by": r.created_by,
+        }
+        for r in rows
+    ]
+    # Also surface the default in-memory accounts so admins see them
+    from auth import USERS_DB
+    db_usernames = {r["username"] for r in result}
+    for uname, u in USERS_DB.items():
+        if uname not in db_usernames:
+            result.append({
+                "username": uname, "role": u["role"], "name": u["name"],
+                "email": None, "active": True,
+                "mfa_enabled": u.get("mfa_enabled", False),
+                "created_at": None, "last_login": None, "created_by": "system",
+            })
+    return result
+
+
+@app.post("/admin/users")
+def create_staff(body: CreateStaffBody, token: dict = Depends(require_role("admin")),
+                 db: Session = Depends(get_db)):
+    if body.role not in ("admin", "nurse", "physician"):
+        raise HTTPException(status_code=400, detail="role must be admin, nurse, or physician")
+    if db.query(StaffUser).filter_by(username=body.username).first():
+        raise HTTPException(status_code=409, detail="Username already exists")
+    import bcrypt as _bcrypt
+    import pyotp as _pyotp
+    pw_hash = _bcrypt.hashpw(body.password.encode(), _bcrypt.gensalt()).decode()
+    user = StaffUser(
+        username=body.username,
+        password_hash=pw_hash,
+        role=body.role,
+        name=body.name,
+        email=body.email,
+        mfa_secret=_pyotp.random_base32(),
+        created_by=token["sub"],
+    )
+    db.add(user)
+    db.commit()
+    write_audit(db, token["sub"], token["role"], "create_staff",
+                details={"username": body.username, "role": body.role})
+    return {"created": True, "username": body.username}
+
+
+@app.patch("/admin/users/{username}")
+def update_staff(username: str, body: UpdateStaffBody,
+                 token: dict = Depends(require_role("admin")),
+                 db: Session = Depends(get_db)):
+    user = db.query(StaffUser).filter_by(username=username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found in DB (system accounts cannot be modified)")
+    if body.active is not None:
+        user.active = body.active
+    if body.role is not None:
+        user.role = body.role
+    if body.name is not None:
+        user.name = body.name
+    if body.email is not None:
+        user.email = body.email
+    db.commit()
+    write_audit(db, token["sub"], token["role"], "update_staff",
+                details={"username": username, "changes": body.dict(exclude_none=True)})
+    return {"updated": True, "username": username}
+
+
+@app.post("/admin/users/{username}/reset-password")
+def reset_staff_password(username: str, new_password: str = Query(..., min_length=8),
+                          token: dict = Depends(require_role("admin")),
+                          db: Session = Depends(get_db)):
+    user = db.query(StaffUser).filter_by(username=username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found (system accounts: change in auth.py)")
+    import bcrypt as _bcrypt
+    user.password_hash = _bcrypt.hashpw(new_password.encode(), _bcrypt.gensalt()).decode()
+    db.commit()
+    write_audit(db, token["sub"], token["role"], "reset_password",
+                details={"username": username})
+    return {"reset": True, "username": username}
+
+
+# ── CareNavigator image analysis ──────────────────────────────────────────────
+
+@app.post("/check/analyze-image")
+async def analyze_image(file: UploadFile = File(...)):
+    """Analyze a patient photo (wound / rash / injury) with Claude Vision and return a clinical description."""
+    import base64 as _b64
+    MAX_BYTES = 5 * 1024 * 1024  # 5 MB
+    allowed = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+
+    content = await file.read()
+    if len(content) > MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Image too large — maximum 5 MB")
+    media_type = (file.content_type or "image/jpeg").split(";")[0].strip()
+    if media_type not in allowed:
+        raise HTTPException(status_code=400, detail=f"Unsupported image type: {media_type}")
+
+    img_b64 = _b64.standard_b64encode(content).decode()
+    try:
+        import anthropic as _anthro
+        _client = _anthro.Anthropic(api_key=_os.getenv("ANTHROPIC_API_KEY"))
+        resp = _client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=300,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": img_b64}},
+                    {"type": "text", "text": (
+                        "You are a clinical triage assistant. A patient submitted this photo as part of their symptom assessment. "
+                        "Describe ONLY what is clinically observable: location, appearance, size estimate, color, pattern, and any signs of severity. "
+                        "Do NOT diagnose. Keep to 2–3 concise sentences. "
+                        "If this is not a medical photo (e.g. a selfie or random object), say so briefly."
+                    )},
+                ],
+            }],
+        )
+        description = resp.content[0].text.strip()
+        return {"success": True, "description": description}
+    except Exception as e:
+        print(f"[ImageAnalysis] Error: {e}")
+        return {"success": False, "description": "", "error": "Image analysis unavailable"}
