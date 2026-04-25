@@ -80,6 +80,8 @@ class AuditMiddleware(BaseHTTPMiddleware):
                     details={"path": request.url.path, "status": response.status_code},
                     success=success,
                 )
+            except Exception as audit_err:
+                print(f"[Audit] Write failed (non-fatal): {audit_err}")
             finally:
                 db.close()
 

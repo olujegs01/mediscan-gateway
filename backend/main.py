@@ -343,7 +343,7 @@ def get_audit(
 
 class BedUpdateRequest(PydanticBase):
     status: str          # available | occupied | boarding | cleaning
-    patient_id: str = None
+    patient_id: str | None = None
 
 
 # ── CareNavigator — Pre-Arrival Symptom Check (public) ────────────────────────
@@ -868,10 +868,10 @@ def list_escalation_rules(_: dict = Depends(verify_token), db: Session = Depends
 
 
 class RulePatch(PydanticBase):
-    enabled: bool = None
-    action: str = None
-    response_time_minutes: int = None
-    condition_value: str = None
+    enabled: bool | None = None
+    action: str | None = None
+    response_time_minutes: int | None = None
+    condition_value: str | None = None
 
 
 @app.patch("/compliance/escalation-rules/{rule_id}")
@@ -1317,10 +1317,10 @@ async def scan_stream(
 # ── SOAP Note inline edit ─────────────────────────────────────────────────────
 
 class SOAPNoteUpdate(PydanticBase):
-    subjective: str = None
-    objective: str = None
-    assessment: str = None
-    plan: str = None
+    subjective: str | None = None
+    objective: str | None = None
+    assessment: str | None = None
+    plan: str | None = None
 
 
 @app.patch("/chart/note/{patient_id}")
@@ -1355,7 +1355,7 @@ def update_chart_note(
 # ── Shift report email ────────────────────────────────────────────────────────
 
 class ReportEmailBody(PydanticBase):
-    recipient: str = None   # defaults to ADMIN_EMAIL if not provided
+    recipient: str | None = None
 
 
 @app.post("/report/email")
@@ -1390,8 +1390,8 @@ def email_report(
 
 class CheckoutRequest(PydanticBase):
     tier: str          # starter | growth
-    email: str = None
-    hospital: str = None
+    email: str | None = None
+    hospital: str | None = None
 
 
 @app.post("/billing/create-checkout-session")
@@ -1457,14 +1457,14 @@ class CreateStaffBody(PydanticBase):
     password: str
     role: str       # admin | nurse | physician
     name: str
-    email: str = None
+    email: str | None = None
 
 
 class UpdateStaffBody(PydanticBase):
-    active: bool = None
-    role: str = None
-    name: str = None
-    email: str = None
+    active: bool | None = None
+    role: str | None = None
+    name: str | None = None
+    email: str | None = None
 
 
 @app.get("/admin/users")
@@ -1604,8 +1604,8 @@ async def analyze_image(file: UploadFile = File(...)):
 
 class FeedbackBody(PydanticBase):
     rating: int           # 1–5
-    comment: str = None
-    category: str = None  # wait_time | staff | communication | overall
+    comment: str | None = None
+    category: str | None = None  # wait_time | staff | communication | overall
     source: str = "portal"
 
 
