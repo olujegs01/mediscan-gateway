@@ -267,9 +267,11 @@ const BED_STATUS_CONFIG = {
 
 function BedBoard({ user, addToast }) {
   const [beds, setBeds] = useState([]);
+  const [queue, setQueue] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedBed, setSelectedBed] = useState(null);
   const [actionLoading, setActionLoading] = useState("");
+  const [assignPatientId, setAssignPatientId] = useState("");
 
   const authH = useCallback(() => ({
     Authorization: `Bearer ${user?.token}`,
@@ -278,8 +280,12 @@ function BedBoard({ user, addToast }) {
 
   const fetchBeds = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/beds`, { headers: { Authorization: `Bearer ${user?.token}` } });
-      if (res.ok) setBeds(await res.json());
+      const [bedsRes, queueRes] = await Promise.all([
+        fetch(`${API_BASE}/beds`, { headers: { Authorization: `Bearer ${user?.token}` } }),
+        fetch(`${API_BASE}/queue`, { headers: { Authorization: `Bearer ${user?.token}` } }),
+      ]);
+      if (bedsRes.ok) setBeds(await bedsRes.json());
+      if (queueRes.ok) setQueue(await queueRes.json());
     } catch (e) {
       console.error("Beds fetch error:", e);
     } finally {
@@ -332,15 +338,20 @@ function BedBoard({ user, addToast }) {
       } else if (action === "boarding") {
         await updateBedStatus(selectedBed.room, "boarding", selectedBed.patient_id);
         addToast({ level: "info", text: `${selectedBed.room} marked boarding.` });
+      } else if (action === "assign") {
+        if (!assignPatientId) return;
+        await updateBedStatus(selectedBed.room, "occupied", assignPatientId);
+        addToast({ level: "info", text: `Patient assigned to ${selectedBed.room}.` });
       }
       setSelectedBed(null);
+      setAssignPatientId("");
       fetchBeds();
     } catch (e) {
       addToast({ level: "warning", text: `Action failed: ${e.message}` });
     } finally {
       setActionLoading("");
     }
-  }, [selectedBed, authH, updateBedStatus, addToast, fetchBeds]);
+  }, [selectedBed, authH, updateBedStatus, addToast, fetchBeds, assignPatientId]);
 
   const units = [...new Set(beds.map(b => b.unit))];
   const summary = {
@@ -356,14 +367,14 @@ function BedBoard({ user, addToast }) {
     <div className="bedboard-layout">
       {/* Action modal */}
       {selectedBed && (
-        <div className="bed-modal-overlay" onClick={() => setSelectedBed(null)}>
+        <div className="bed-modal-overlay" onClick={() => { setSelectedBed(null); setAssignPatientId(""); }}>
           <div className="bed-modal" onClick={e => e.stopPropagation()}>
             <div className="bed-modal-header">
               <div>
                 <div className="bed-modal-room">{selectedBed.room}</div>
                 <div className="bed-modal-unit">{selectedBed.unit}</div>
               </div>
-              <button className="bed-modal-close" onClick={() => setSelectedBed(null)}>✕</button>
+              <button className="bed-modal-close" onClick={() => { setSelectedBed(null); setAssignPatientId(""); }}>✕</button>
             </div>
             <div className="bed-modal-status" style={{ color: BED_STATUS_CONFIG[selectedBed.status]?.color }}>
               ● {BED_STATUS_CONFIG[selectedBed.status]?.label}
@@ -405,6 +416,33 @@ function BedBoard({ user, addToast }) {
                 >
                   {actionLoading === "occupied" ? "Updating…" : "🛏 Mark Occupied"}
                 </button>
+              )}
+              {(selectedBed.status === "available" || selectedBed.status === "cleaning") && queue.length > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  <div style={{ fontSize: 11, color: "#64748b", marginBottom: 6 }}>Assign patient from queue:</div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <select
+                      value={assignPatientId}
+                      onChange={e => setAssignPatientId(e.target.value)}
+                      style={{ flex: 1, padding: "7px 10px", borderRadius: 8, background: "#0d1b2e", border: "1px solid #1e293b", color: "#e2e8f0", fontSize: 13 }}
+                    >
+                      <option value="">Select patient…</option>
+                      {queue.map(p => (
+                        <option key={p.patient_id} value={p.patient_id}>
+                          {p.name} — ESI {p.esi_level} · {p.chief_complaint?.slice(0, 30)}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      className="bed-action-btn success"
+                      onClick={() => handleAction("assign")}
+                      disabled={!assignPatientId || !!actionLoading}
+                      style={{ whiteSpace: "nowrap" }}
+                    >
+                      {actionLoading === "assign" ? "Assigning…" : "✓ Assign"}
+                    </button>
+                  </div>
+                </div>
               )}
               {(selectedBed.status === "occupied") && (
                 <button

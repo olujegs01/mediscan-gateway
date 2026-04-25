@@ -207,6 +207,16 @@ def fhir_status(_: dict = Depends(verify_token)):
     return {"fhir_available": fhir_available()}
 
 
+def verify_query_token(token: str = Query(...)) -> dict:
+    """Accept JWT via ?token= query param (used for SSE streams and PDF downloads)."""
+    try:
+        return pyjwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except pyjwt.ExpiredSignatureError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
+    except pyjwt.InvalidTokenError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+
 # ── WebSockets ────────────────────────────────────────────────────────────────
 
 @app.websocket("/ws")
@@ -245,7 +255,7 @@ def get_queue(token: dict = Depends(verify_token)):
 
 
 @app.delete("/queue/{patient_id}")
-def discharge_patient(
+async def discharge_patient(
     patient_id: str,
     token: dict = Depends(require_role("admin", "nurse", "physician")),
     db: Session = Depends(get_db),
@@ -401,7 +411,7 @@ def check_assess(body: CheckAssessRequest, request: Request, db: Session = Depen
 
 
 @app.post("/check/pre-register")
-def check_pre_register(body: PreRegisterRequest, db: Session = Depends(get_db)):
+async def check_pre_register(body: PreRegisterRequest, db: Session = Depends(get_db)):
     """Pre-arrival ED registration — creates an 'incoming' entry visible to staff."""
     import uuid
     from database import PatientRecord
@@ -500,7 +510,7 @@ def list_beds(_: dict = Depends(verify_token), db: Session = Depends(get_db)):
 
 
 @app.put("/beds/{room:path}")
-def update_bed_status(
+async def update_bed_status(
     room: str,
     body: BedUpdateRequest,
     token: dict = Depends(require_role("admin", "nurse", "physician")),
@@ -812,7 +822,7 @@ async def twilio_sms_webhook(request: Request, db: Session = Depends(get_db)):
 # ── Discharge + auto-trigger journey ─────────────────────────────────────────
 
 @app.delete("/queue/{patient_id}/discharge")
-def discharge_with_journey(
+async def discharge_with_journey(
     patient_id: str,
     start_journey: bool = Query(default=True),
     token: dict = Depends(require_role("admin", "nurse", "physician")),
@@ -1087,14 +1097,6 @@ def generate_report(
 
 
 # ── Scan Stream ───────────────────────────────────────────────────────────────
-
-def verify_query_token(token: str = Query(...)) -> dict:
-    try:
-        return pyjwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-    except pyjwt.ExpiredSignatureError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
-    except pyjwt.InvalidTokenError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
 
 @app.get("/scan/stream")
