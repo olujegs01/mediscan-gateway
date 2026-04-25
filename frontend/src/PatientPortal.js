@@ -18,6 +18,9 @@ export default function PatientPortal() {
   const [response, setResponse] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const [feedback, setFeedback] = useState({ rating: 0, comment: "", category: "overall" });
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
+  const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
 
   useEffect(() => {
     if (!token) { setError("Invalid portal link."); setLoading(false); return; }
@@ -30,6 +33,23 @@ export default function PatientPortal() {
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
   }, [token]);
+
+  const submitFeedback = async () => {
+    if (!feedback.rating) return;
+    setFeedbackSubmitting(true);
+    try {
+      await fetch(`${API_BASE}/journeys/${data.id}/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(feedback),
+      });
+      setFeedbackSubmitted(true);
+    } catch {
+      alert("Failed to submit feedback. Please try again.");
+    } finally {
+      setFeedbackSubmitting(false);
+    }
+  };
 
   const submitResponse = async () => {
     if (!response.trim()) return;
@@ -218,6 +238,49 @@ export default function PatientPortal() {
                 </div>
               </div>
             ))}
+          </div>
+        )}
+
+        {/* ── Patient feedback ── */}
+        {!feedbackSubmitted ? (
+          <div className="pp-card">
+            <h3 className="pp-card-title">Rate Your Experience</h3>
+            <p style={{ fontSize: 13, color: "#64748b", marginBottom: 12 }}>
+              Help us improve care for future patients.
+            </p>
+            <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+              {[1, 2, 3, 4, 5].map(s => (
+                <button key={s} onClick={() => setFeedback(f => ({ ...f, rating: s }))}
+                  style={{
+                    flex: 1, padding: "8px 0", borderRadius: 8, border: "1px solid",
+                    borderColor: feedback.rating >= s ? "#0d9488" : "#1e293b",
+                    background: feedback.rating >= s ? "rgba(13,148,136,0.15)" : "transparent",
+                    color: feedback.rating >= s ? "#5eead4" : "#475569",
+                    fontSize: 18, cursor: "pointer", transition: "all 0.15s",
+                  }}>★</button>
+              ))}
+            </div>
+            <select value={feedback.category} onChange={e => setFeedback(f => ({ ...f, category: e.target.value }))}
+              style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid #1e293b", background: "#0d1b2e", color: "#e2e8f0", marginBottom: 10, fontSize: 13 }}>
+              <option value="overall">Overall Experience</option>
+              <option value="wait_time">Wait Time</option>
+              <option value="staff">Staff & Communication</option>
+              <option value="communication">Follow-up Communication</option>
+            </select>
+            <textarea rows={3} placeholder="Optional comment…"
+              value={feedback.comment} onChange={e => setFeedback(f => ({ ...f, comment: e.target.value }))}
+              style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid #1e293b", background: "#0d1b2e", color: "#e2e8f0", fontSize: 13, resize: "vertical", boxSizing: "border-box", marginBottom: 10 }}
+            />
+            <button onClick={submitFeedback} disabled={!feedback.rating || feedbackSubmitting}
+              style={{ width: "100%", padding: "10px 0", borderRadius: 8, background: feedback.rating ? "#0d9488" : "#1e293b", color: feedback.rating ? "white" : "#475569", border: "none", cursor: feedback.rating ? "pointer" : "not-allowed", fontWeight: 600, fontSize: 14 }}>
+              {feedbackSubmitting ? "Submitting…" : "Submit Feedback"}
+            </button>
+          </div>
+        ) : (
+          <div className="pp-card" style={{ textAlign: "center", padding: "24px 16px" }}>
+            <div style={{ fontSize: 32, marginBottom: 8 }}>⭐</div>
+            <div style={{ fontWeight: 700, color: "#4ade80", marginBottom: 6 }}>Thank You!</div>
+            <div style={{ fontSize: 13, color: "#64748b" }}>Your feedback helps us improve care for every patient.</div>
           </div>
         )}
 

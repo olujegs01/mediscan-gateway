@@ -172,6 +172,75 @@ function exportCSV(data) {
   URL.revokeObjectURL(url);
 }
 
+// ── Satisfaction card ─────────────────────────────────────────────────────────
+function SatisfactionSection({ user }) {
+  const [sat, setSat] = useState(null);
+  useEffect(() => {
+    fetch(`${API_BASE}/outcomes/satisfaction`, {
+      headers: { Authorization: `Bearer ${user?.token}` },
+    }).then(r => r.ok ? r.json() : null).then(setSat).catch(() => {});
+  }, [user?.token]);
+
+  if (!sat || sat.total_responses === 0) {
+    return (
+      <Section title="Patient Satisfaction" subtitle="Post-discharge feedback scores">
+        <div style={{ textAlign: "center", color: "#475569", padding: "32px 0", fontSize: 14 }}>
+          No feedback collected yet — feedback is submitted via the patient portal after discharge.
+        </div>
+      </Section>
+    );
+  }
+
+  const stars = Array.from({ length: 5 }, (_, i) => i + 1);
+  const maxDist = Math.max(...Object.values(sat.distribution));
+
+  return (
+    <Section title="Patient Satisfaction" subtitle={`${sat.total_responses} responses · avg ${sat.avg_rating}/5`}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
+        <div>
+          <div style={{ fontSize: 48, fontWeight: 800, color: "#0d9488", lineHeight: 1 }}>{sat.avg_rating}</div>
+          <div style={{ color: "#64748b", fontSize: 13, marginBottom: 16 }}>out of 5 · {sat.total_responses} responses</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {stars.reverse().map(s => (
+              <div key={s} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 12, color: "#64748b", width: 16 }}>{s}★</span>
+                <div style={{ flex: 1, height: 8, borderRadius: 4, background: "#1e293b", overflow: "hidden" }}>
+                  <div style={{
+                    height: "100%", borderRadius: 4, background: "#0d9488",
+                    width: `${Math.round((sat.distribution[String(s)] || 0) / maxDist * 100)}%`,
+                    transition: "width 0.4s",
+                  }} />
+                </div>
+                <span style={{ fontSize: 12, color: "#94a3b8", width: 24 }}>{sat.distribution[String(s)] || 0}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div>
+          <div style={{ fontSize: 12, color: "#64748b", fontWeight: 600, marginBottom: 10, textTransform: "uppercase", letterSpacing: "0.05em" }}>By Category</div>
+          {Object.entries(sat.by_category).map(([cat, avg]) => (
+            <div key={cat} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: "1px solid #1e293b" }}>
+              <span style={{ fontSize: 13, color: "#94a3b8", textTransform: "capitalize" }}>{cat.replace("_", " ")}</span>
+              <span style={{ fontWeight: 700, color: avg >= 4 ? "#4ade80" : avg >= 3 ? "#fbbf24" : "#f87171" }}>{avg}/5</span>
+            </div>
+          ))}
+          {sat.recent_comments?.length > 0 && (
+            <div style={{ marginTop: 16 }}>
+              <div style={{ fontSize: 12, color: "#64748b", fontWeight: 600, marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.05em" }}>Recent Comments</div>
+              {sat.recent_comments.slice(0, 3).map((c, i) => (
+                <div key={i} style={{ padding: "8px 10px", background: "#0a1520", borderRadius: 8, marginBottom: 6, fontSize: 12, color: "#94a3b8", borderLeft: `3px solid ${c.rating >= 4 ? "#0d9488" : "#ca8a04"}` }}>
+                  <span style={{ color: c.rating >= 4 ? "#4ade80" : "#fbbf24" }}>{"★".repeat(c.rating)}</span>
+                  {" "}{c.comment || <i>No comment</i>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </Section>
+  );
+}
+
 // ── Main dashboard ────────────────────────────────────────────────────────────
 export default function OutcomesDashboard({ user }) {
   const [data, setData] = useState(null);
@@ -445,6 +514,9 @@ export default function OutcomesDashboard({ user }) {
           </LineChart>
         </ResponsiveContainer>
       </Section>
+
+      {/* ── Patient satisfaction ── */}
+      <SatisfactionSection user={user} />
     </div>
   );
 }

@@ -238,6 +238,20 @@ class DemoRequest(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class PatientFeedback(Base):
+    __tablename__ = "patient_feedback"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    hospital_id = Column(String, index=True, default=_default_hospital)
+    journey_id = Column(String, index=True, nullable=True)
+    patient_id = Column(String, index=True, nullable=True)
+    rating = Column(Integer)           # 1–5
+    comment = Column(Text, nullable=True)
+    category = Column(String, nullable=True)  # wait_time | staff | communication | overall
+    submitted_at = Column(DateTime, default=datetime.utcnow)
+    source = Column(String, default="portal")   # portal | sms | kiosk
+
+
 class StaffUser(Base):
     __tablename__ = "staff_users"
 

@@ -103,8 +103,20 @@ export function AuthProvider({ children }) {
     return data;
   };
 
+  const loginWithToken = (accessToken) => {
+    const payload = decodeTokenPayload(accessToken);
+    localStorage.setItem("mediscan_token", accessToken);
+    setUser({
+      username: payload.sub || "demo",
+      role: payload.role || "physician",
+      name: payload.sub === "demo" ? "Demo User" : payload.sub,
+      token: accessToken,
+    });
+    scheduleRefresh(accessToken);
+  };
+
   return (
-    <AuthContext.Provider value={{ user, login, logout, loading, warming }}>
+    <AuthContext.Provider value={{ user, login, loginWithToken, logout, loading, warming }}>
       {children}
     </AuthContext.Provider>
   );

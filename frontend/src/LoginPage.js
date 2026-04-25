@@ -575,11 +575,12 @@ function BookDemoModal({ onClose }) {
 }
 
 export default function LoginPage() {
-  const { login } = useAuth();
+  const { login, loginWithToken } = useAuth();
   const [stats, setStats] = useState(null);
   const [form, setForm] = useState({ username: "", password: "", totp_code: "" });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [demoLoading, setDemoLoading] = useState(false);
   const [mfaRequired, setMfaRequired] = useState(false);
   const [showDemoModal, setShowDemoModal] = useState(false);
   const modulesRef = useRef(null);
@@ -604,6 +605,24 @@ export default function LoginPage() {
   };
 
   const openDemo = useCallback(() => setShowDemoModal(true), []);
+
+  const handleDemoLogin = async () => {
+    setDemoLoading(true);
+    setError("");
+    try {
+      const res = await fetch(`${API_BASE}/auth/demo-login`, { method: "POST" });
+      const data = await res.json();
+      if (data.access_token) {
+        loginWithToken(data.access_token);
+      } else {
+        setError("Demo login unavailable — please use credentials below.");
+      }
+    } catch {
+      setError("Network error. Please try again.");
+    } finally {
+      setDemoLoading(false);
+    }
+  };
 
   return (
     <div className="lp-root">
@@ -726,6 +745,26 @@ export default function LoginPage() {
                 {loading ? <><span className="btn-spinner" /> Signing in…</> : mfaRequired ? "Verify Code →" : "Sign In →"}
               </button>
             </form>
+
+            <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "16px 0 12px" }}>
+              <div style={{ flex: 1, height: 1, background: "#1e293b" }} />
+              <span style={{ fontSize: 11, color: "#475569" }}>or</span>
+              <div style={{ flex: 1, height: 1, background: "#1e293b" }} />
+            </div>
+
+            <button
+              onClick={handleDemoLogin}
+              disabled={demoLoading}
+              style={{
+                width: "100%", padding: "10px 0", borderRadius: 8,
+                background: "transparent", border: "1px solid #0d9488",
+                color: "#5eead4", fontSize: 13, fontWeight: 600,
+                cursor: demoLoading ? "not-allowed" : "pointer",
+                marginBottom: 16, transition: "all 0.2s",
+              }}
+            >
+              {demoLoading ? "Loading demo…" : "▶ Try Live Demo — no login required"}
+            </button>
 
             <div className="lp-demo-creds">
               <div className="lp-creds-label">Demo credentials</div>

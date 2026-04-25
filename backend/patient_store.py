@@ -44,8 +44,10 @@ def upsert_patient(db: Session, record: dict) -> PatientRecord:
     return existing
 
 
-def load_active_patients(db: Session) -> List[dict]:
-    rows = db.query(PatientRecord).filter_by(status="active").order_by(PatientRecord.esi_level).all()
+def load_active_patients(db: Session, hospital_id: str = "default") -> List[dict]:
+    rows = (db.query(PatientRecord)
+            .filter_by(status="active", hospital_id=hospital_id)
+            .order_by(PatientRecord.esi_level).all())
     return [_row_to_dict(r) for r in rows]
 
 
@@ -105,6 +107,7 @@ def write_audit(
     ip_address: Optional[str] = None,
     details: Optional[dict] = None,
     success: bool = True,
+    hospital_id: str = "default",
 ):
     entry = AuditLog(
         username=username,
@@ -114,14 +117,16 @@ def write_audit(
         ip_address=ip_address,
         details=details or {},
         success=success,
+        hospital_id=hospital_id,
     )
     db.add(entry)
     db.commit()
 
 
-def get_audit_logs(db: Session, limit: int = 500) -> List[dict]:
+def get_audit_logs(db: Session, limit: int = 500, hospital_id: str = "default") -> List[dict]:
     rows = (
         db.query(AuditLog)
+        .filter_by(hospital_id=hospital_id)
         .order_by(AuditLog.timestamp.desc())
         .limit(limit)
         .all()

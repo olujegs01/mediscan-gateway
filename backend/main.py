@@ -20,7 +20,8 @@ from auth import (
     LoginRequest, TokenResponse, verify_token, require_role, login,
     SECRET_KEY, ALGORITHM, setup_mfa, enable_mfa, disable_mfa, create_token, _get_user,
 )
-from database import init_db, get_db, StaffUser
+from database import init_db, get_db, StaffUser, PatientFeedback
+from fhir_client import fhir_mode
 from patient_store import (
     upsert_patient, load_active_patients, discharge_patient_db,
     clear_all_active, get_audit_logs, save_shift_report, get_shift_reports, write_audit,
@@ -237,8 +238,10 @@ async def ws_lobby(websocket: WebSocket):
 # ── Queue (protected) ─────────────────────────────────────────────────────────
 
 @app.get("/queue")
-def get_queue(_: dict = Depends(verify_token)):
-    return sorted(er_queue, key=lambda p: p["esi_level"])
+def get_queue(token: dict = Depends(verify_token)):
+    hid = token.get("hospital_id", "default")
+    filtered = [p for p in er_queue if p.get("hospital_id", "default") == hid]
+    return sorted(filtered, key=lambda p: p["esi_level"])
 
 
 @app.delete("/queue/{patient_id}")
@@ -323,7 +326,7 @@ def get_audit(
     limit: int = Query(default=200, le=1000),
     db: Session = Depends(get_db),
 ):
-    return get_audit_logs(db, limit=limit)
+    return get_audit_logs(db, limit=limit, hospital_id=token.get("hospital_id", "default"))
 
 
 # ── Bed Board ─────────────────────────────────────────────────────────────────
@@ -435,6 +438,7 @@ def check_pre_register(body: PreRegisterRequest, db: Session = Depends(get_db)):
 
     record = {
         "patient_id": patient_id,
+        "hospital_id": "default",
         "name": body.name,
         "age": body.age,
         "phone": body.phone,
@@ -970,6 +974,7 @@ def patient_portal(token: str, db: Session = Depends(get_db)):
             due = journey.discharge_at + __import__("datetime").timedelta(hours=h)
             upcoming.append({"checkin_num": i + 1, "due_at": due.isoformat(), "hours_post_discharge": h})
     return {
+        "id": journey.id,
         "name": journey.name,
         "esi_level": journey.esi_level,
         "journey_status": journey.journey_status,
@@ -1239,6 +1244,7 @@ async def scan_stream(
 
         result = {
             "patient_id": patient_id,
+            "hospital_id": token.get("hospital_id", "default"),
             "name": biometric.name or name,
             "age": biometric.age if biometric.age > 0 else age,
             "phone": phone,
@@ -1292,6 +1298,7 @@ async def scan_stream(
                 patient_id=patient_id,
                 ip_address=request.client.host if request.client else None,
                 details={"esi": esi, "complaint": chief_complaint},
+                hospital_id=token.get("hospital_id", "default"),
             )
         except Exception as e:
             print(f"DB persistence error: {e}")
@@ -1589,3 +1596,106 @@ async def analyze_image(file: UploadFile = File(...)):
     except Exception as e:
         print(f"[ImageAnalysis] Error: {e}")
         return {"success": False, "description": "", "error": "Image analysis unavailable"}
+
+
+# ── Patient Feedback Loop ─────────────────────────────────────────────────────
+
+class FeedbackBody(PydanticBase):
+    rating: int           # 1–5
+    comment: str = None
+    category: str = None  # wait_time | staff | communication | overall
+    source: str = "portal"
+
+
+@app.post("/journeys/{journey_id}/feedback")
+def submit_journey_feedback(journey_id: str, body: FeedbackBody, db: Session = Depends(get_db)):
+    if body.rating < 1 or body.rating > 5:
+        raise HTTPException(status_code=400, detail="rating must be 1–5")
+    journey = db.query(ClinicalJourneyModel).filter_by(id=journey_id).first()
+    if not journey:
+        raise HTTPException(status_code=404, detail="Journey not found")
+    fb = PatientFeedback(
+        hospital_id=getattr(journey, "hospital_id", "default"),
+        journey_id=journey_id,
+        patient_id=journey.patient_id,
+        rating=body.rating,
+        comment=body.comment,
+        category=body.category,
+        source=body.source,
+    )
+    db.add(fb)
+    db.commit()
+    return {"success": True, "rating": body.rating}
+
+
+@app.get("/outcomes/satisfaction")
+def satisfaction_stats(
+    _: dict = Depends(require_role("admin", "nurse", "physician")),
+    db: Session = Depends(get_db),
+):
+    from sqlalchemy import func
+    rows = db.query(PatientFeedback).all()
+    if not rows:
+        return {"total_responses": 0, "avg_rating": None, "by_category": {}, "distribution": {}}
+    total = len(rows)
+    avg = round(sum(r.rating for r in rows) / total, 2)
+    by_cat: dict = {}
+    for r in rows:
+        cat = r.category or "overall"
+        by_cat.setdefault(cat, []).append(r.rating)
+    cat_avgs = {c: round(sum(v) / len(v), 2) for c, v in by_cat.items()}
+    dist = {str(i): sum(1 for r in rows if r.rating == i) for i in range(1, 6)}
+    recent = [
+        {"rating": r.rating, "comment": r.comment, "category": r.category,
+         "submitted_at": r.submitted_at.isoformat()}
+        for r in sorted(rows, key=lambda x: x.submitted_at, reverse=True)[:10]
+    ]
+    return {
+        "total_responses": total,
+        "avg_rating": avg,
+        "by_category": cat_avgs,
+        "distribution": dist,
+        "recent_comments": recent,
+    }
+
+
+# ── FHIR / EHR Integration Status ────────────────────────────────────────────
+
+@app.get("/fhir/status")
+def fhir_integration_status(_: dict = Depends(verify_token)):
+    available = fhir_available()
+    mode = fhir_mode()
+    return {
+        "fhir_available": available,
+        "mode": mode,
+        "description": (
+            "Connected to Epic FHIR R4 sandbox" if mode == "epic"
+            else "Using HAPI FHIR public sandbox" if mode == "hapi"
+            else "FHIR integration disabled — using simulated EHR data"
+        ),
+        "supported_resources": ["Patient", "Condition", "MedicationRequest"] if available else [],
+    }
+
+
+# ── Demo Self-Service Login ───────────────────────────────────────────────────
+
+@app.post("/auth/demo-login")
+def demo_login():
+    """Issues a read-only demo token — no password required. For live product demos."""
+    token = create_token("demo", "physician", mfa_verified=True, hospital_id="demo")
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "demo": True,
+        "message": "Demo session — read-only access, no real patient data",
+    }
+
+
+@app.get("/demo/seed")
+def demo_seed_queue(db: Session = Depends(get_db)):
+    """Re-seeds demo patients into the queue for live demos. Public — no auth."""
+    seed_demo_data(db)
+    for p in load_active_patients(db, hospital_id="default"):
+        if not any(q["patient_id"] == p["patient_id"] for q in er_queue):
+            er_queue.append(p)
+    return {"seeded": True, "queue_size": len(er_queue)}
