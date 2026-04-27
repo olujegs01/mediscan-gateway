@@ -238,6 +238,18 @@ class DemoRequest(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class PatientNote(Base):
+    __tablename__ = "patient_notes"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    patient_id = Column(String, index=True)
+    hospital_id = Column(String, index=True, default=_default_hospital)
+    note_text = Column(Text)
+    note_type = Column(String, default="general")  # general | allergy | alert | lab | interpreter
+    created_by = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class PatientFeedback(Base):
     __tablename__ = "patient_feedback"
 

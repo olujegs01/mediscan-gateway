@@ -6,6 +6,7 @@ import ClinicalJourneys from "./ClinicalJourneys";
 import OutcomesDashboard from "./OutcomesDashboard";
 import BillingPage from "./BillingPage";
 import StaffPage from "./StaffPage";
+import ChargeDashboard from "./ChargeDashboard";
 
 const WS_BASE = API_BASE.replace(/^https/, "wss").replace(/^http/, "ws");
 
@@ -186,13 +187,87 @@ function TriageCard({ data }) {
   );
 }
 
-function PatientQueueCard({ patient, onDischarge, onSOAP }) {
+function PatientQueueCard({ patient, onDischarge, onSOAP, user }) {
   const cfg = ESI_CONFIG[patient.esi_level] || ESI_CONFIG[5];
   const td = patient.triage_detail || {};
   const sepsisCritical = ["high", "critical"].includes(td.sepsis_probability);
+  const isEscalated = patient.wait_escalated;
+  const waitActual = patient.wait_minutes_actual;
+
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [notes, setNotes] = useState([]);
+  const [notesLoading, setNotesLoading] = useState(false);
+  const [noteText, setNoteText] = useState("");
+  const [noteType, setNoteType] = useState("general");
+  const [addingNote, setAddingNote] = useState(false);
+  const [assignedNurse, setAssignedNurse] = useState(patient.assigned_nurse || "");
+  const [assignedPhysician, setAssignedPhysician] = useState(patient.assigned_physician || "");
+  const [staffList, setStaffList] = useState([]);
+  const [assignOpen, setAssignOpen] = useState(false);
+
+  const authH = useCallback(() => ({
+    Authorization: `Bearer ${user?.token}`,
+    "Content-Type": "application/json",
+  }), [user?.token]);
+
+  const loadNotes = useCallback(async () => {
+    setNotesLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/queue/${patient.patient_id}/notes`, { headers: authH() });
+      if (res.ok) setNotes(await res.json());
+    } catch {}
+    setNotesLoading(false);
+  }, [patient.patient_id, authH]);
+
+  const toggleNotes = () => {
+    if (!notesOpen) loadNotes();
+    setNotesOpen(v => !v);
+  };
+
+  const submitNote = async () => {
+    if (!noteText.trim()) return;
+    setAddingNote(true);
+    try {
+      const res = await fetch(`${API_BASE}/queue/${patient.patient_id}/notes`, {
+        method: "POST", headers: authH(),
+        body: JSON.stringify({ note_text: noteText, note_type: noteType }),
+      });
+      if (res.ok) { setNoteText(""); loadNotes(); }
+    } catch {}
+    setAddingNote(false);
+  };
+
+  const loadStaff = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/staff/list`, { headers: authH() });
+      if (res.ok) setStaffList(await res.json());
+    } catch {}
+  }, [authH]);
+
+  const toggleAssign = () => {
+    if (!assignOpen) loadStaff();
+    setAssignOpen(v => !v);
+  };
+
+  const saveAssignment = async () => {
+    try {
+      await fetch(`${API_BASE}/queue/${patient.patient_id}/assign`, {
+        method: "PATCH", headers: authH(),
+        body: JSON.stringify({ assigned_nurse: assignedNurse || null, assigned_physician: assignedPhysician || null }),
+      });
+      setAssignOpen(false);
+    } catch {}
+  };
+
+  const NOTE_TYPE_COLORS = { general: "#94a3b8", allergy: "#f87171", alert: "#fb923c", lab: "#60a5fa", interpreter: "#a78bfa" };
 
   return (
-    <div className="queue-card" style={{ borderLeftColor: cfg.color }}>
+    <div className="queue-card" style={{ borderLeftColor: isEscalated ? "#dc2626" : cfg.color, borderLeftWidth: isEscalated ? 4 : 3 }}>
+      {isEscalated && (
+        <div style={{ background: "rgba(220,38,38,0.15)", border: "1px solid #dc2626", borderRadius: 6, padding: "6px 10px", marginBottom: 8, fontSize: 12, fontWeight: 700, color: "#f87171", display: "flex", alignItems: "center", gap: 8 }}>
+          ⚠ WAIT ESCALATION — {waitActual != null ? `${waitActual} min` : "overdue"} in queue
+        </div>
+      )}
       {sepsisCritical && <div className="card-sepsis-banner">🧬 SEPSIS {td.sepsis_probability?.toUpperCase()} · qSOFA {td.qsofa_score}</div>}
       {td.behavioral_health_flag && <div className="card-bh-banner">🧠 BEHAVIORAL HEALTH</div>}
 
@@ -200,9 +275,17 @@ function PatientQueueCard({ patient, onDischarge, onSOAP }) {
         <div>
           <div className="queue-name">{patient.name}</div>
           <div className="queue-meta">Age {patient.age} · {patient.chief_complaint}</div>
+          {(patient.assigned_nurse || patient.assigned_physician) && (
+            <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>
+              {patient.assigned_nurse && `👤 ${patient.assigned_nurse}`}
+              {patient.assigned_nurse && patient.assigned_physician && " · "}
+              {patient.assigned_physician && `🩺 ${patient.assigned_physician}`}
+            </div>
+          )}
         </div>
-        <div className="queue-esi" style={{ background: cfg.color }}>
+        <div className="queue-esi" style={{ background: isEscalated ? "#dc2626" : cfg.color }}>
           {cfg.icon} ESI {patient.esi_level}
+          {waitActual != null && <div style={{ fontSize: 10, fontWeight: 400 }}>{waitActual}m</div>}
         </div>
       </div>
 
@@ -212,7 +295,6 @@ function PatientQueueCard({ patient, onDischarge, onSOAP }) {
         <span>🆔 {patient.wristband_code}</span>
       </div>
 
-      {/* Clinical intelligence badges */}
       <div className="queue-intel">
         {td.admission_probability != null && (
           <span className="intel-badge" style={{ color: td.admission_probability >= 70 ? "#ef4444" : "#94a3b8" }}>
@@ -244,13 +326,70 @@ function PatientQueueCard({ patient, onDischarge, onSOAP }) {
         </div>
       )}
 
+      {/* Staff assignment panel */}
+      {assignOpen && (
+        <div style={{ background: "#0a1520", borderRadius: 8, padding: 12, marginTop: 8, border: "1px solid #1e293b" }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8", marginBottom: 8 }}>Assign Staff</div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <select value={assignedNurse} onChange={e => setAssignedNurse(e.target.value)}
+              style={{ flex: 1, padding: "6px 8px", background: "#0d1b2e", border: "1px solid #1e293b", borderRadius: 6, color: "#e2e8f0", fontSize: 12 }}>
+              <option value="">Nurse…</option>
+              {staffList.filter(s => s.role === "nurse").map(s => <option key={s.username} value={s.name}>{s.name}</option>)}
+            </select>
+            <select value={assignedPhysician} onChange={e => setAssignedPhysician(e.target.value)}
+              style={{ flex: 1, padding: "6px 8px", background: "#0d1b2e", border: "1px solid #1e293b", borderRadius: 6, color: "#e2e8f0", fontSize: 12 }}>
+              <option value="">Physician…</option>
+              {staffList.filter(s => s.role === "physician").map(s => <option key={s.username} value={s.name}>{s.name}</option>)}
+            </select>
+          </div>
+          <button onClick={saveAssignment} style={{ padding: "5px 12px", background: "#0d9488", border: "none", borderRadius: 6, color: "#fff", fontSize: 12, cursor: "pointer" }}>
+            Save Assignment
+          </button>
+        </div>
+      )}
+
+      {/* Notes panel */}
+      {notesOpen && (
+        <div style={{ background: "#0a1520", borderRadius: 8, padding: 12, marginTop: 8, border: "1px solid #1e293b" }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8", marginBottom: 8 }}>Clinical Notes</div>
+          {notesLoading ? (
+            <div style={{ fontSize: 12, color: "#475569" }}>Loading…</div>
+          ) : (
+            <>
+              {notes.length === 0 && <div style={{ fontSize: 12, color: "#475569", marginBottom: 8 }}>No notes yet</div>}
+              {notes.map(n => (
+                <div key={n.id} style={{ marginBottom: 8, padding: "6px 8px", background: "#060e1a", borderRadius: 6, borderLeft: `3px solid ${NOTE_TYPE_COLORS[n.note_type] || "#475569"}` }}>
+                  <div style={{ fontSize: 11, color: NOTE_TYPE_COLORS[n.note_type] || "#94a3b8", fontWeight: 600, textTransform: "uppercase", marginBottom: 2 }}>
+                    {n.note_type} · {n.created_by} · {new Date(n.created_at).toLocaleTimeString()}
+                  </div>
+                  <div style={{ fontSize: 13, color: "#e2e8f0" }}>{n.note_text}</div>
+                </div>
+              ))}
+              <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                <select value={noteType} onChange={e => setNoteType(e.target.value)}
+                  style={{ padding: "5px 6px", background: "#0d1b2e", border: "1px solid #1e293b", borderRadius: 6, color: "#e2e8f0", fontSize: 11 }}>
+                  {["general","allergy","alert","lab","interpreter"].map(t => <option key={t} value={t}>{t}</option>)}
+                </select>
+                <input value={noteText} onChange={e => setNoteText(e.target.value)}
+                  placeholder="Add clinical note…"
+                  onKeyDown={e => e.key === "Enter" && submitNote()}
+                  style={{ flex: 1, padding: "5px 8px", background: "#0d1b2e", border: "1px solid #1e293b", borderRadius: 6, color: "#e2e8f0", fontSize: 12 }}
+                />
+                <button onClick={submitNote} disabled={addingNote || !noteText.trim()}
+                  style={{ padding: "5px 10px", background: "#0d9488", border: "none", borderRadius: 6, color: "#fff", fontSize: 12, cursor: "pointer" }}>
+                  {addingNote ? "…" : "Add"}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       <div className="queue-card-actions">
-        <button className="soap-btn" onClick={() => onSOAP(patient)}>
-          📝 SOAP Note
-        </button>
-        <button className="discharge-btn" onClick={() => onDischarge(patient.patient_id)}>
-          Discharge
-        </button>
+        <button className="soap-btn" onClick={() => onSOAP(patient)}>📝 SOAP</button>
+        <button className="soap-btn" style={{ background: assignOpen ? "#1e3a5f" : undefined }} onClick={toggleAssign}>👥 Assign</button>
+        <button className="soap-btn" style={{ background: notesOpen ? "#1e3a5f" : undefined }} onClick={toggleNotes}>📋 Notes</button>
+        <button className="discharge-btn" onClick={() => onDischarge(patient.patient_id)}>Discharge</button>
       </div>
     </div>
   );
@@ -957,6 +1096,7 @@ const PAGE_TITLES = {
   audit:      "Audit Log",
   compliance: "Compliance Center",
   billing:    "Billing",
+  charge:     "Charge Nurse Dashboard",
 };
 
 const NAV_ITEMS = [
@@ -964,6 +1104,7 @@ const NAV_ITEMS = [
   { id: "queue",     icon: "🏥", label: "ER Queue",       badge: true },
   { id: "analytics", icon: "📊", label: "Command",        },
   { id: "beds",      icon: "🛏", label: "Bed Board",      },
+  { id: "charge",    icon: "🖥", label: "Charge Nurse",   escalationBadge: true },
   { id: "journeys",  icon: "🩺", label: "Journeys",       journeyBadge: true },
 ];
 
@@ -1003,6 +1144,8 @@ export default function App() {
   const [soapLoading, setSoapLoading] = useState(false);
   const [soapEditing, setSoapEditing] = useState(false);
   const [soapEdits, setSoapEdits] = useState({});
+  const [escalationCount, setEscalationCount] = useState(0);
+  const [searchQuery, setSearchQuery] = useState("");
 
   const addLog = (zone, message) => {
     const time = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -1075,6 +1218,13 @@ export default function App() {
       case "journey_escalation":
         setJourneyEscalations(n => n + 1);
         addToast({ level: "critical", text: `🚨 Journey escalation: ${msg.name} reported worsening symptoms` });
+        break;
+      case "wait_escalation":
+        setEscalationCount(n => n + 1);
+        setQueue(prev => prev.map(p =>
+          p.patient_id === msg.patient_id ? { ...p, wait_escalated: true, wait_minutes_actual: msg.wait_minutes } : p
+        ));
+        addToast({ level: "critical", text: `⚠ Wait escalation: ${msg.name} ESI ${msg.esi_level} — ${msg.wait_minutes} min` });
         break;
       default: break;
     }
@@ -1259,7 +1409,7 @@ export default function App() {
             <button
               key={item.id}
               className={`nav-item ${activeTab === item.id ? "active" : ""}`}
-              onClick={() => setActiveTab(item.id)}
+              onClick={() => { setActiveTab(item.id); if (item.id === "charge") setEscalationCount(0); }}
             >
               <span className="nav-item-icon">{item.icon}</span>
               {item.label}
@@ -1271,6 +1421,9 @@ export default function App() {
               )}
               {item.journeyBadge && journeyEscalations > 0 && (
                 <span className="journey-alert-dot" title={`${journeyEscalations} escalation(s)`} />
+              )}
+              {item.escalationBadge && escalationCount > 0 && (
+                <span className="nav-badge" style={{ background: "#dc2626" }}>{escalationCount}</span>
               )}
             </button>
           ))}
@@ -1527,6 +1680,12 @@ export default function App() {
             <div className="queue-header">
               <h2>Live ER Queue</h2>
               <div className="queue-controls">
+                <input
+                  placeholder="Search patient name or complaint…"
+                  value={searchQuery}
+                  onChange={e => setSearchQuery(e.target.value)}
+                  style={{ padding: "7px 12px", background: "#0f1923", border: "1px solid #1e293b", borderRadius: 8, color: "#e2e8f0", fontSize: 13, width: 240 }}
+                />
                 <button className="refresh-btn" onClick={fetchQueue}>↻ Refresh</button>
                 {queue.length > 0 && (
                   <button className="clear-btn" onClick={async () => {
@@ -1538,7 +1697,10 @@ export default function App() {
             </div>
 
             {[1, 2, 3, 4, 5].map(esi => {
-              const patients = queue.filter(p => p.esi_level === esi);
+              const q = searchQuery.trim().toLowerCase();
+              const patients = queue.filter(p => p.esi_level === esi && (
+                !q || p.name?.toLowerCase().includes(q) || p.chief_complaint?.toLowerCase().includes(q)
+              ));
               if (patients.length === 0) return null;
               const cfg = ESI_CONFIG[esi];
               return (
@@ -1548,7 +1710,7 @@ export default function App() {
                   </div>
                   <div className="queue-cards">
                     {patients.map(p => (
-                      <PatientQueueCard key={p.patient_id} patient={p} onDischarge={dischargePatient} onSOAP={generateSoap} />
+                      <PatientQueueCard key={p.patient_id} patient={p} onDischarge={dischargePatient} onSOAP={generateSoap} user={user} />
                     ))}
                   </div>
                 </div>
@@ -1567,6 +1729,7 @@ export default function App() {
 
         {activeTab === "analytics" && <OutcomesDashboard user={user} />}
         {activeTab === "beds" && <BedBoard user={user} addToast={addToast} />}
+        {activeTab === "charge"     && <ChargeDashboard user={user} />}
         {activeTab === "report"     && <ShiftReportPanel user={user} queue={queue} />}
         {activeTab === "staff"      && <StaffPage user={user} />}
         {activeTab === "billing"    && <BillingPage user={user} />}

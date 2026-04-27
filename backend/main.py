@@ -20,7 +20,8 @@ from auth import (
     LoginRequest, TokenResponse, verify_token, require_role, login,
     SECRET_KEY, ALGORITHM, setup_mfa, enable_mfa, disable_mfa, create_token, _get_user,
 )
-from database import init_db, get_db, StaffUser, PatientFeedback
+from database import init_db, get_db, StaffUser, PatientFeedback, PatientNote
+from database import PatientRecord
 from fhir_client import fhir_mode
 from patient_store import (
     upsert_patient, load_active_patients, discharge_patient_db,
@@ -94,6 +95,36 @@ _MAX_ASSESS_PER_HOUR = 15
 _ASSESS_WINDOW_SECONDS = 3600
 
 
+async def _wait_time_escalation_loop():
+    """Every 30 s: flag ESI 1-2 patients waiting >5 min and ESI 3 waiting >60 min."""
+    while True:
+        await asyncio.sleep(30)
+        now = datetime.utcnow()
+        for p in er_queue:
+            try:
+                ts = p.get("timestamp")
+                if not ts:
+                    continue
+                arrival = datetime.fromisoformat(ts.replace("Z", ""))
+                wait_min = (now - arrival).total_seconds() / 60
+                p["wait_minutes_actual"] = round(wait_min)
+                esi = p.get("esi_level", 5)
+                was_escalated = p.get("wait_escalated", False)
+                should_escalate = (esi <= 2 and wait_min > 5) or (esi == 3 and wait_min > 60)
+                if should_escalate and not was_escalated:
+                    p["wait_escalated"] = True
+                    asyncio.create_task(ws_manager.broadcast_staff("wait_escalation", {
+                        "patient_id": p["patient_id"],
+                        "name": p["name"],
+                        "esi_level": esi,
+                        "wait_minutes": round(wait_min),
+                    }))
+                elif not should_escalate:
+                    p["wait_escalated"] = False
+            except Exception:
+                pass
+
+
 async def _auto_generate_soap(patient_id: str, patient_data: dict):
     """Background: generate SOAP note immediately after scan so it's ready when nurse opens it."""
     try:
@@ -131,6 +162,7 @@ async def startup():
     seed_escalation_rules(db)
     seed_demo_data(db)
     asyncio.create_task(journey_monitor_loop(get_db, ws_manager.broadcast_all))
+    asyncio.create_task(_wait_time_escalation_loop())
 
 
 _demo_counter = 0
@@ -1701,3 +1733,257 @@ def demo_seed_queue(db: Session = Depends(get_db)):
         if not any(q["patient_id"] == p["patient_id"] for q in er_queue):
             er_queue.append(p)
     return {"seeded": True, "queue_size": len(er_queue)}
+
+
+# ── Feature 1 & 2: Charge Nurse Dashboard ─────────────────────────────────────
+
+@app.get("/charge/dashboard")
+def charge_dashboard(_: dict = Depends(verify_token), db: Session = Depends(get_db)):
+    """Real-time summary for wall-mounted charge nurse display."""
+    from datetime import timedelta
+    now = datetime.utcnow()
+    bed_summary = get_bed_summary(db)
+
+    queue_by_esi: dict = {1: [], 2: [], 3: [], 4: [], 5: []}
+    for p in er_queue:
+        esi = p.get("esi_level", 5)
+        wait = p.get("wait_minutes_actual", p.get("wait_time_estimate", 0))
+        queue_by_esi[esi].append({
+            "patient_id": p["patient_id"],
+            "name": p["name"],
+            "wait_minutes": wait,
+            "room": p.get("room_assignment", "—"),
+            "escalated": p.get("wait_escalated", False),
+            "assigned_nurse": p.get("assigned_nurse"),
+            "assigned_physician": p.get("assigned_physician"),
+        })
+
+    longest_waits = sorted(
+        er_queue,
+        key=lambda p: p.get("wait_minutes_actual", p.get("wait_time_estimate", 0)),
+        reverse=True,
+    )[:5]
+
+    cutoff = now - timedelta(hours=8)
+    throughput_8h = db.query(PatientRecord).filter(
+        PatientRecord.status == "discharged",
+        PatientRecord.discharged_at >= cutoff,
+    ).count()
+
+    return {
+        "timestamp": now.isoformat(),
+        "queue_depth": len(er_queue),
+        "escalated_count": sum(1 for p in er_queue if p.get("wait_escalated")),
+        "sepsis_active": sum(1 for p in er_queue if p.get("triage_detail", {}).get("sepsis_probability") in ("high", "critical")),
+        "bh_active": sum(1 for p in er_queue if p.get("triage_detail", {}).get("behavioral_health_flag")),
+        "bed_summary": bed_summary,
+        "queue_by_esi": {str(k): v for k, v in queue_by_esi.items()},
+        "longest_waits": [
+            {
+                "name": p["name"], "esi": p.get("esi_level"),
+                "wait_min": p.get("wait_minutes_actual", p.get("wait_time_estimate", 0)),
+                "room": p.get("room_assignment", "—"),
+                "escalated": p.get("wait_escalated", False),
+            }
+            for p in longest_waits
+        ],
+        "throughput_8h": throughput_8h,
+    }
+
+
+# ── Feature 3: Clinical Notes ─────────────────────────────────────────────────
+
+class NoteBody(PydanticBase):
+    note_text: str
+    note_type: str = "general"  # general | allergy | alert | lab | interpreter
+
+
+@app.get("/queue/{patient_id}/notes")
+def get_patient_notes(patient_id: str, _: dict = Depends(verify_token), db: Session = Depends(get_db)):
+    notes = db.query(PatientNote).filter_by(patient_id=patient_id).order_by(PatientNote.created_at.desc()).all()
+    return [
+        {"id": n.id, "note_text": n.note_text, "note_type": n.note_type,
+         "created_by": n.created_by, "created_at": n.created_at.isoformat()}
+        for n in notes
+    ]
+
+
+@app.post("/queue/{patient_id}/notes")
+def add_patient_note(
+    patient_id: str, body: NoteBody,
+    token: dict = Depends(require_role("admin", "nurse", "physician")),
+    db: Session = Depends(get_db),
+):
+    if not body.note_text.strip():
+        raise HTTPException(status_code=400, detail="Note text required")
+    note = PatientNote(
+        patient_id=patient_id,
+        note_text=body.note_text.strip(),
+        note_type=body.note_type,
+        created_by=token["sub"],
+        hospital_id=token.get("hospital_id", "default"),
+    )
+    db.add(note)
+    db.commit()
+    # Update in-memory note count so queue card can show badge without refetch
+    for p in er_queue:
+        if p["patient_id"] == patient_id:
+            p["note_count"] = p.get("note_count", 0) + 1
+            break
+    write_audit(db, token["sub"], token["role"], "add_note", patient_id=patient_id,
+                hospital_id=token.get("hospital_id", "default"))
+    return {"id": note.id, "note_text": note.note_text, "note_type": note.note_type,
+            "created_by": note.created_by, "created_at": note.created_at.isoformat()}
+
+
+@app.delete("/notes/{note_id}")
+def delete_patient_note(
+    note_id: str,
+    token: dict = Depends(require_role("admin", "nurse", "physician")),
+    db: Session = Depends(get_db),
+):
+    note = db.query(PatientNote).filter_by(id=note_id).first()
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    patient_id = note.patient_id
+    db.delete(note)
+    db.commit()
+    for p in er_queue:
+        if p["patient_id"] == patient_id:
+            p["note_count"] = max(0, p.get("note_count", 1) - 1)
+            break
+    return {"deleted": note_id}
+
+
+# ── Feature 4: Shift Analytics ────────────────────────────────────────────────
+
+@app.get("/report/shift-summary")
+def shift_summary(
+    token: dict = Depends(require_role("admin", "nurse", "physician")),
+    db: Session = Depends(get_db),
+):
+    from datetime import timedelta
+    now = datetime.utcnow()
+    # Day shift starts 07:00, night shift 19:00
+    if now.hour >= 19:
+        shift_start = now.replace(hour=19, minute=0, second=0, microsecond=0)
+    elif now.hour >= 7:
+        shift_start = now.replace(hour=7, minute=0, second=0, microsecond=0)
+    else:
+        shift_start = (now - timedelta(days=1)).replace(hour=19, minute=0, second=0, microsecond=0)
+
+    esi_breakdown = {str(i): sum(1 for p in er_queue if p["esi_level"] == i) for i in range(1, 6)}
+    wait_by_esi = {}
+    for esi in range(1, 6):
+        pts = [p.get("wait_minutes_actual", p.get("wait_time_estimate", 0)) for p in er_queue if p["esi_level"] == esi]
+        wait_by_esi[str(esi)] = round(sum(pts) / len(pts), 1) if pts else 0
+
+    scanner_count = sum(1 for p in er_queue if not p.get("pre_arrival"))
+    manual_count = sum(1 for p in er_queue if p.get("pre_arrival"))
+
+    discharged_this_shift = db.query(PatientRecord).filter(
+        PatientRecord.status == "discharged",
+        PatientRecord.discharged_at >= shift_start,
+    ).count()
+
+    from database import SOAPNote as SOAPNoteModel
+    soap_count = db.query(SOAPNoteModel).filter(SOAPNoteModel.generated_at >= shift_start).count()
+
+    return {
+        "shift_start": shift_start.isoformat(),
+        "shift_label": "Day Shift 07:00–19:00" if 7 <= now.hour < 19 else "Night Shift 19:00–07:00",
+        "total_active": len(er_queue),
+        "discharged_this_shift": discharged_this_shift,
+        "esi_breakdown": esi_breakdown,
+        "avg_wait_by_esi": wait_by_esi,
+        "intake_ratio": {"scanner": scanner_count, "manual": manual_count},
+        "bed_utilization": get_bed_summary(db),
+        "soap_notes_generated": soap_count,
+        "escalated_patients": sum(1 for p in er_queue if p.get("wait_escalated")),
+        "sepsis_active": sum(1 for p in er_queue if p.get("triage_detail", {}).get("sepsis_probability") in ("high", "critical")),
+        "bh_active": sum(1 for p in er_queue if p.get("triage_detail", {}).get("behavioral_health_flag")),
+    }
+
+
+# ── Feature 5: Patient Search & History ──────────────────────────────────────
+
+@app.get("/patients/search")
+def search_patients(
+    q: str = Query(..., min_length=1),
+    include_discharged: bool = Query(default=False),
+    token: dict = Depends(verify_token),
+    db: Session = Depends(get_db),
+):
+    base = db.query(PatientRecord).filter(PatientRecord.name.ilike(f"%{q}%"))
+    if not include_discharged:
+        base = base.filter_by(status="active")
+    rows = base.order_by(PatientRecord.timestamp.desc()).limit(30).all()
+    return [
+        {
+            "patient_id": r.patient_id,
+            "name": r.name,
+            "age": r.age,
+            "phone": r.phone,
+            "chief_complaint": r.chief_complaint,
+            "esi_level": r.esi_level,
+            "status": r.status,
+            "room_assignment": r.room_assignment,
+            "risk_flags": r.risk_flags or [],
+            "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+            "discharged_at": r.discharged_at.isoformat() if r.discharged_at else None,
+        }
+        for r in rows
+    ]
+
+
+# ── Feature 6: Staff Assignment ───────────────────────────────────────────────
+
+class AssignBody(PydanticBase):
+    assigned_nurse: str | None = None
+    assigned_physician: str | None = None
+
+
+@app.patch("/queue/{patient_id}/assign")
+def assign_staff_to_patient(
+    patient_id: str, body: AssignBody,
+    token: dict = Depends(require_role("admin", "nurse", "physician")),
+    db: Session = Depends(get_db),
+):
+    found = False
+    for p in er_queue:
+        if p["patient_id"] == patient_id:
+            if body.assigned_nurse is not None:
+                p["assigned_nurse"] = body.assigned_nurse or None
+            if body.assigned_physician is not None:
+                p["assigned_physician"] = body.assigned_physician or None
+            found = True
+            break
+    # Persist in triage_detail JSON so it survives restart
+    row = db.query(PatientRecord).filter_by(patient_id=patient_id).first()
+    if row:
+        td = dict(row.triage_detail or {})
+        if body.assigned_nurse is not None:
+            td["assigned_nurse"] = body.assigned_nurse or None
+        if body.assigned_physician is not None:
+            td["assigned_physician"] = body.assigned_physician or None
+        row.triage_detail = td
+        db.commit()
+    write_audit(db, token["sub"], token["role"], "assign_staff", patient_id=patient_id,
+                details={"nurse": body.assigned_nurse, "physician": body.assigned_physician},
+                hospital_id=token.get("hospital_id", "default"))
+    if not found:
+        raise HTTPException(status_code=404, detail="Patient not in active queue")
+    return {"assigned": True, "patient_id": patient_id}
+
+
+@app.get("/staff/list")
+def get_staff_list(_: dict = Depends(verify_token), db: Session = Depends(get_db)):
+    """Lightweight staff roster for assignment dropdowns — no sensitive fields."""
+    from auth import USERS_DB
+    rows = db.query(StaffUser).filter_by(active=True).all()
+    result = [{"username": r.username, "name": r.name, "role": r.role} for r in rows]
+    db_names = {r["username"] for r in result}
+    for uname, u in USERS_DB.items():
+        if uname not in db_names:
+            result.append({"username": uname, "name": u["name"], "role": u["role"]})
+    return sorted(result, key=lambda x: (x["role"], x["name"]))
