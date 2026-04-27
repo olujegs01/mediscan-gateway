@@ -200,6 +200,7 @@ function PatientQueueCard({ patient, onDischarge, onSOAP, user }) {
   const [noteText, setNoteText] = useState("");
   const [noteType, setNoteType] = useState("general");
   const [addingNote, setAddingNote] = useState(false);
+  const [noteError, setNoteError] = useState("");
   const [assignedNurse, setAssignedNurse] = useState(patient.assigned_nurse || "");
   const [assignedPhysician, setAssignedPhysician] = useState(patient.assigned_physician || "");
   const [staffList, setStaffList] = useState([]);
@@ -227,13 +228,22 @@ function PatientQueueCard({ patient, onDischarge, onSOAP, user }) {
   const submitNote = async () => {
     if (!noteText.trim()) return;
     setAddingNote(true);
+    setNoteError("");
     try {
       const res = await fetch(`${API_BASE}/queue/${patient.patient_id}/notes`, {
         method: "POST", headers: authH(),
         body: JSON.stringify({ note_text: noteText, note_type: noteType }),
       });
-      if (res.ok) { setNoteText(""); loadNotes(); }
-    } catch {}
+      if (res.ok) {
+        setNoteText("");
+        loadNotes();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        setNoteError(err.detail || `Error ${res.status}`);
+      }
+    } catch (e) {
+      setNoteError("Network error — check connection");
+    }
     setAddingNote(false);
   };
 
@@ -365,6 +375,7 @@ function PatientQueueCard({ patient, onDischarge, onSOAP, user }) {
                   <div style={{ fontSize: 13, color: "#e2e8f0" }}>{n.note_text}</div>
                 </div>
               ))}
+              {noteError && <div style={{ fontSize: 11, color: "#f87171", marginTop: 4 }}>⚠ {noteError}</div>}
               <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
                 <select value={noteType} onChange={e => setNoteType(e.target.value)}
                   style={{ padding: "5px 6px", background: "#0d1b2e", border: "1px solid #1e293b", borderRadius: 6, color: "#e2e8f0", fontSize: 11 }}>
