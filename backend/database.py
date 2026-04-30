@@ -225,6 +225,24 @@ class Subscription(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class LWBSRecord(Base):
+    __tablename__ = "lwbs_records"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    hospital_id = Column(String, index=True, default=_default_hospital)
+    patient_id = Column(String, index=True, nullable=True)
+    name = Column(String)
+    age = Column(Integer, nullable=True)
+    phone = Column(String, nullable=True)
+    chief_complaint = Column(Text, nullable=True)
+    esi_level = Column(Integer, nullable=True)
+    left_at = Column(DateTime, default=datetime.utcnow)
+    wait_min = Column(Integer, nullable=True)
+    sms_sent = Column(Boolean, default=False)
+    sms_sent_at = Column(DateTime, nullable=True)
+    followup_booked = Column(Boolean, default=False)
+
+
 class DemoRequest(Base):
     __tablename__ = "demo_requests"
 

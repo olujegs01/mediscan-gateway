@@ -94,6 +94,10 @@ _assess_rate: dict = defaultdict(lambda: {"count": 0, "window_start": datetime.u
 _MAX_ASSESS_PER_HOUR = 15
 _ASSESS_WINDOW_SECONDS = 3600
 
+# Demo-login rate limit: max 10 demo tokens per IP per hour
+_demo_login_rate: dict = defaultdict(lambda: {"count": 0, "window_start": datetime.utcnow()})
+_MAX_DEMO_LOGINS_PER_HOUR = 10
+
 
 async def _wait_time_escalation_loop():
     """Every 30 s: flag ESI 1-2 patients waiting >5 min and ESI 3 waiting >60 min."""
@@ -143,6 +147,14 @@ async def _auto_generate_soap(patient_id: str, patient_data: dict):
 
 @app.on_event("startup")
 async def startup():
+    if SECRET_KEY == "mediscan-dev-secret-change-in-prod":
+        import sys
+        print(
+            "\n[SECURITY WARNING] SECRET_KEY is set to the well-known dev default. "
+            "Anyone with access to this source can forge JWTs. "
+            "Set SECRET_KEY to a random 32+ character secret before deploying.\n",
+            file=sys.stderr,
+        )
     init_db()
     db = next(get_db())
     try:
@@ -242,7 +254,10 @@ def fhir_status(_: dict = Depends(verify_token)):
 def verify_query_token(token: str = Query(...)) -> dict:
     """Accept JWT via ?token= query param (used for SSE streams and PDF downloads)."""
     try:
-        return pyjwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = pyjwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("scope") == "pre_mfa":
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="MFA verification required")
+        return payload
     except pyjwt.ExpiredSignatureError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
     except pyjwt.InvalidTokenError:
@@ -293,9 +308,14 @@ async def discharge_patient(
     db: Session = Depends(get_db),
 ):
     global er_queue
+    hospital_id = token.get("hospital_id", "default")
+    if not any(p["patient_id"] == patient_id and p.get("hospital_id", "default") == hospital_id
+               for p in er_queue):
+        raise HTTPException(status_code=404, detail="Patient not found")
     er_queue = [p for p in er_queue if p["patient_id"] != patient_id]
     discharge_patient_db(db, patient_id)
-    write_audit(db, token["sub"], token["role"], "discharge", patient_id=patient_id)
+    write_audit(db, token["sub"], token["role"], "discharge", patient_id=patient_id,
+                hospital_id=hospital_id)
     asyncio.create_task(ws_manager.broadcast_all(
         "patient_discharged",
         {"patient_id": patient_id},
@@ -326,12 +346,14 @@ def health():
 # ── Analytics Dashboard ───────────────────────────────────────────────────────
 
 @app.get("/analytics")
-def get_analytics(_: dict = Depends(verify_token), db: Session = Depends(get_db)):
+def get_analytics(token: dict = Depends(verify_token), db: Session = Depends(get_db)):
     """Full analytics payload — replaces the old endpoint, returns everything."""
-    data = get_full_analytics(db, er_queue)
+    hospital_id = token.get("hospital_id", "default")
+    my_queue = [p for p in er_queue if p.get("hospital_id", "default") == hospital_id]
+    data = get_full_analytics(db, my_queue)
     # Preserve legacy alert format for any existing consumers
     cap = data["capacity"]
-    data["alerts"] = _generate_ed_alerts(er_queue, cap["occupancy_percent"], cap["boarding_patients"])
+    data["alerts"] = _generate_ed_alerts(my_queue, cap["occupancy_percent"], cap["boarding_patients"])
     return data
 
 
@@ -536,6 +558,10 @@ async def check_pre_register(body: PreRegisterRequest, db: Session = Depends(get
     }
 
 
+# room → datetime when cleaning started; managed by update_bed_status and get_bed_turnover
+_bed_cleaning_start: dict = {}
+
+
 @app.get("/beds")
 def list_beds(_: dict = Depends(verify_token), db: Session = Depends(get_db)):
     return get_beds(db)
@@ -554,6 +580,11 @@ async def update_bed_status(
     result = update_bed(db, room, body.status, body.patient_id, updated_by=token["sub"])
     if not result:
         raise HTTPException(status_code=404, detail="Bed not found")
+    # Track when cleaning starts for turnover timer
+    if body.status == "cleaning":
+        _bed_cleaning_start[room] = datetime.utcnow()
+    elif room in _bed_cleaning_start:
+        del _bed_cleaning_start[room]
     write_audit(db, token["sub"], token["role"], "update_bed",
                 details={"room": room, "status": body.status})
     asyncio.create_task(ws_manager.broadcast_all("bed_updated", result, result))
@@ -710,11 +741,12 @@ def check_schedule(body: ScheduleRequest, db: Session = Depends(get_db)):
 # ── SOAP Note Generation ──────────────────────────────────────────────────────
 
 @app.get("/chart/note/{patient_id}")
-def get_chart_note(patient_id: str, _: dict = Depends(verify_token), db: Session = Depends(get_db)):
-    note = get_soap_note(db, patient_id)
-    if not note:
+def get_chart_note(patient_id: str, token: dict = Depends(verify_token), db: Session = Depends(get_db)):
+    hospital_id = token.get("hospital_id", "default")
+    row = db.query(SOAPNote).filter_by(patient_id=patient_id, hospital_id=hospital_id).first()
+    if not row:
         raise HTTPException(status_code=404, detail="No SOAP note found for this patient")
-    return note
+    return get_soap_note(db, patient_id)
 
 
 @app.post("/chart/note/{patient_id}/generate")
@@ -723,7 +755,12 @@ def generate_chart_note(
     token: dict = Depends(require_role("admin", "nurse", "physician")),
     db: Session = Depends(get_db),
 ):
-    patient = next((p for p in er_queue if p["patient_id"] == patient_id), None)
+    hospital_id = token.get("hospital_id", "default")
+    patient = next(
+        (p for p in er_queue
+         if p["patient_id"] == patient_id and p.get("hospital_id", "default") == hospital_id),
+        None,
+    )
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not in active queue")
     note = generate_soap_note(patient)
@@ -737,6 +774,9 @@ def finalize_chart_note(
     token: dict = Depends(require_role("physician")),
     db: Session = Depends(get_db),
 ):
+    hospital_id = token.get("hospital_id", "default")
+    if not db.query(SOAPNote).filter_by(patient_id=patient_id, hospital_id=hospital_id).first():
+        raise HTTPException(status_code=404, detail="SOAP note not found")
     ok = finalize_note(db, patient_id, token["sub"])
     if not ok:
         raise HTTPException(status_code=404, detail="SOAP note not found")
@@ -746,10 +786,13 @@ def finalize_chart_note(
 @app.get("/chart/note/{patient_id}/pdf")
 def download_soap_pdf(
     patient_id: str,
-    _: dict = Depends(verify_query_token),
+    token: dict = Depends(verify_query_token),
     db: Session = Depends(get_db),
 ):
     """Download SOAP note as a formatted PDF."""
+    hospital_id = token.get("hospital_id", "default")
+    if not db.query(SOAPNote).filter_by(patient_id=patient_id, hospital_id=hospital_id).first():
+        raise HTTPException(status_code=404, detail="No SOAP note found for this patient")
     note = get_soap_note(db, patient_id)
     if not note:
         raise HTTPException(status_code=404, detail="No SOAP note found for this patient")
@@ -782,7 +825,12 @@ def trigger_patient_journey(
     token: dict = Depends(require_role("admin", "nurse", "physician")),
     db: Session = Depends(get_db),
 ):
-    patient = next((p for p in er_queue if p["patient_id"] == patient_id), None)
+    hospital_id = token.get("hospital_id", "default")
+    patient = next(
+        (p for p in er_queue
+         if p["patient_id"] == patient_id and p.get("hospital_id", "default") == hospital_id),
+        None,
+    )
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found in queue")
     return trigger_journey(db, patient_id, patient["name"], patient.get("phone", ""), patient["esi_level"])
@@ -833,7 +881,23 @@ def resolve_journey(
 
 @app.post("/twilio/sms")
 async def twilio_sms_webhook(request: Request, db: Session = Depends(get_db)):
-    form = await request.form()
+    twilio_auth = _os.getenv("TWILIO_AUTH_TOKEN", "")
+    if twilio_auth:
+        try:
+            from twilio.request_validator import RequestValidator
+            body = await request.body()
+            form_raw = await request.form()
+            params = dict(form_raw)
+            url = str(request.url)
+            sig = request.headers.get("X-Twilio-Signature", "")
+            if not RequestValidator(twilio_auth).validate(url, params, sig):
+                raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+            form = form_raw
+        except ImportError:
+            form = await request.form()
+    else:
+        form = await request.form()
+
     from_phone = form.get("From", "")
     body_text = form.get("Body", "")
 
@@ -861,7 +925,14 @@ async def discharge_with_journey(
     db: Session = Depends(get_db),
 ):
     global er_queue
-    patient = next((p for p in er_queue if p["patient_id"] == patient_id), None)
+    hospital_id = token.get("hospital_id", "default")
+    patient = next(
+        (p for p in er_queue
+         if p["patient_id"] == patient_id and p.get("hospital_id", "default") == hospital_id),
+        None,
+    )
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
     er_queue = [p for p in er_queue if p["patient_id"] != patient_id]
     discharge_patient_db(db, patient_id)
     write_audit(db, token["sub"], token["role"], "discharge", patient_id=patient_id)
@@ -1362,7 +1433,8 @@ def update_chart_note(
     token: dict = Depends(require_role("admin", "nurse", "physician")),
     db: Session = Depends(get_db),
 ):
-    note = db.query(SOAPNote).filter_by(patient_id=patient_id).first()
+    hospital_id = token.get("hospital_id", "default")
+    note = db.query(SOAPNote).filter_by(patient_id=patient_id, hospital_id=hospital_id).first()
     if not note:
         raise HTTPException(status_code=404, detail="SOAP note not found")
     if body.subjective is not None:
@@ -1467,7 +1539,7 @@ async def billing_webhook(request: Request, db: Session = Depends(get_db)):
 
 
 @app.get("/billing/status")
-def billing_status(db: Session = Depends(get_db)):
+def billing_status(_: dict = Depends(require_role("admin")), db: Session = Depends(get_db)):
     from billing import stripe_available
     sub = db.query(Subscription).order_by(Subscription.created_at.desc()).first()
     return {
@@ -1574,15 +1646,21 @@ def update_staff(username: str, body: UpdateStaffBody,
     return {"updated": True, "username": username}
 
 
+class ResetPasswordBody(PydanticBase):
+    new_password: str
+
+
 @app.post("/admin/users/{username}/reset-password")
-def reset_staff_password(username: str, new_password: str = Query(..., min_length=8),
+def reset_staff_password(username: str, body: ResetPasswordBody,
                           token: dict = Depends(require_role("admin")),
                           db: Session = Depends(get_db)):
+    if len(body.new_password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
     user = db.query(StaffUser).filter_by(username=username).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found (system accounts: change in auth.py)")
     import bcrypt as _bcrypt
-    user.password_hash = _bcrypt.hashpw(new_password.encode(), _bcrypt.gensalt()).decode()
+    user.password_hash = _bcrypt.hashpw(body.new_password.encode(), _bcrypt.gensalt()).decode()
     db.commit()
     write_audit(db, token["sub"], token["role"], "reset_password",
                 details={"username": username})
@@ -1664,11 +1742,12 @@ def submit_journey_feedback(journey_id: str, body: FeedbackBody, db: Session = D
 
 @app.get("/outcomes/satisfaction")
 def satisfaction_stats(
-    _: dict = Depends(require_role("admin", "nurse", "physician")),
+    token: dict = Depends(require_role("admin", "nurse", "physician")),
     db: Session = Depends(get_db),
 ):
     from sqlalchemy import func
-    rows = db.query(PatientFeedback).all()
+    hospital_id = token.get("hospital_id", "default")
+    rows = db.query(PatientFeedback).filter_by(hospital_id=hospital_id).all()
     if not rows:
         return {"total_responses": 0, "avg_rating": None, "by_category": {}, "distribution": {}}
     total = len(rows)
@@ -1714,20 +1793,31 @@ def fhir_integration_status(_: dict = Depends(verify_token)):
 # ── Demo Self-Service Login ───────────────────────────────────────────────────
 
 @app.post("/auth/demo-login")
-def demo_login():
-    """Issues a read-only demo token — no password required. For live product demos."""
+def demo_login(request: Request):
+    """Issues a demo token — no password required. For live product demos only."""
+    client_ip = (request.client.host if request.client else "unknown")[:45]
+    now = datetime.utcnow()
+    rec = _demo_login_rate[client_ip]
+    window_age = (now - rec["window_start"]).total_seconds()
+    if window_age > _ASSESS_WINDOW_SECONDS:
+        rec["count"] = 0
+        rec["window_start"] = now
+    if rec["count"] >= _MAX_DEMO_LOGINS_PER_HOUR:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                            detail="Demo login limit reached — try again in an hour.")
+    rec["count"] += 1
     token = create_token("demo", "physician", mfa_verified=True, hospital_id="demo")
     return {
         "access_token": token,
         "token_type": "bearer",
         "demo": True,
-        "message": "Demo session — read-only access, no real patient data",
+        "message": "Demo session active — uses synthetic demo data only",
     }
 
 
 @app.get("/demo/seed")
-def demo_seed_queue(db: Session = Depends(get_db)):
-    """Re-seeds demo patients into the queue for live demos. Public — no auth."""
+def demo_seed_queue(_: dict = Depends(require_role("admin")), db: Session = Depends(get_db)):
+    """Re-seeds demo patients into the queue. Admin only — prevents public queue pollution."""
     seed_demo_data(db)
     for p in load_active_patients(db, hospital_id="default"):
         if not any(q["patient_id"] == p["patient_id"] for q in er_queue):
@@ -1738,14 +1828,16 @@ def demo_seed_queue(db: Session = Depends(get_db)):
 # ── Feature 1 & 2: Charge Nurse Dashboard ─────────────────────────────────────
 
 @app.get("/charge/dashboard")
-def charge_dashboard(_: dict = Depends(verify_token), db: Session = Depends(get_db)):
+def charge_dashboard(token: dict = Depends(verify_token), db: Session = Depends(get_db)):
     """Real-time summary for wall-mounted charge nurse display."""
     from datetime import timedelta
     now = datetime.utcnow()
     bed_summary = get_bed_summary(db)
+    hospital_id = token.get("hospital_id", "default")
+    my_queue = [p for p in er_queue if p.get("hospital_id", "default") == hospital_id]
 
     queue_by_esi: dict = {1: [], 2: [], 3: [], 4: [], 5: []}
-    for p in er_queue:
+    for p in my_queue:
         esi = p.get("esi_level", 5)
         wait = p.get("wait_minutes_actual", p.get("wait_time_estimate", 0))
         queue_by_esi[esi].append({
@@ -1759,7 +1851,7 @@ def charge_dashboard(_: dict = Depends(verify_token), db: Session = Depends(get_
         })
 
     longest_waits = sorted(
-        er_queue,
+        my_queue,
         key=lambda p: p.get("wait_minutes_actual", p.get("wait_time_estimate", 0)),
         reverse=True,
     )[:5]
@@ -1768,14 +1860,15 @@ def charge_dashboard(_: dict = Depends(verify_token), db: Session = Depends(get_
     throughput_8h = db.query(PatientRecord).filter(
         PatientRecord.status == "discharged",
         PatientRecord.discharged_at >= cutoff,
+        PatientRecord.hospital_id == hospital_id,
     ).count()
 
     return {
         "timestamp": now.isoformat(),
-        "queue_depth": len(er_queue),
-        "escalated_count": sum(1 for p in er_queue if p.get("wait_escalated")),
-        "sepsis_active": sum(1 for p in er_queue if p.get("triage_detail", {}).get("sepsis_probability") in ("high", "critical")),
-        "bh_active": sum(1 for p in er_queue if p.get("triage_detail", {}).get("behavioral_health_flag")),
+        "queue_depth": len(my_queue),
+        "escalated_count": sum(1 for p in my_queue if p.get("wait_escalated")),
+        "sepsis_active": sum(1 for p in my_queue if p.get("triage_detail", {}).get("sepsis_probability") in ("high", "critical")),
+        "bh_active": sum(1 for p in my_queue if p.get("triage_detail", {}).get("behavioral_health_flag")),
         "bed_summary": bed_summary,
         "queue_by_esi": {str(k): v for k, v in queue_by_esi.items()},
         "longest_waits": [
@@ -1799,8 +1892,11 @@ class NoteBody(PydanticBase):
 
 
 @app.get("/queue/{patient_id}/notes")
-def get_patient_notes(patient_id: str, _: dict = Depends(verify_token), db: Session = Depends(get_db)):
-    notes = db.query(PatientNote).filter_by(patient_id=patient_id).order_by(PatientNote.created_at.desc()).all()
+def get_patient_notes(patient_id: str, token: dict = Depends(verify_token), db: Session = Depends(get_db)):
+    hospital_id = token.get("hospital_id", "default")
+    notes = (db.query(PatientNote)
+             .filter_by(patient_id=patient_id, hospital_id=hospital_id)
+             .order_by(PatientNote.created_at.desc()).all())
     return [
         {"id": n.id, "note_text": n.note_text, "note_type": n.note_type,
          "created_by": n.created_by, "created_at": n.created_at.isoformat()}
@@ -1842,7 +1938,8 @@ def delete_patient_note(
     token: dict = Depends(require_role("admin", "nurse", "physician")),
     db: Session = Depends(get_db),
 ):
-    note = db.query(PatientNote).filter_by(id=note_id).first()
+    hospital_id = token.get("hospital_id", "default")
+    note = db.query(PatientNote).filter_by(id=note_id, hospital_id=hospital_id).first()
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
     patient_id = note.patient_id
@@ -1914,7 +2011,11 @@ def search_patients(
     token: dict = Depends(verify_token),
     db: Session = Depends(get_db),
 ):
-    base = db.query(PatientRecord).filter(PatientRecord.name.ilike(f"%{q}%"))
+    hospital_id = token.get("hospital_id", "default")
+    base = db.query(PatientRecord).filter(
+        PatientRecord.name.ilike(f"%{q}%"),
+        PatientRecord.hospital_id == hospital_id,
+    )
     if not include_discharged:
         base = base.filter_by(status="active")
     rows = base.order_by(PatientRecord.timestamp.desc()).limit(30).all()
@@ -1949,9 +2050,10 @@ def assign_staff_to_patient(
     token: dict = Depends(require_role("admin", "nurse", "physician")),
     db: Session = Depends(get_db),
 ):
+    hospital_id = token.get("hospital_id", "default")
     found = False
     for p in er_queue:
-        if p["patient_id"] == patient_id:
+        if p["patient_id"] == patient_id and p.get("hospital_id", "default") == hospital_id:
             if body.assigned_nurse is not None:
                 p["assigned_nurse"] = body.assigned_nurse or None
             if body.assigned_physician is not None:
@@ -1959,7 +2061,7 @@ def assign_staff_to_patient(
             found = True
             break
     # Persist in triage_detail JSON so it survives restart
-    row = db.query(PatientRecord).filter_by(patient_id=patient_id).first()
+    row = db.query(PatientRecord).filter_by(patient_id=patient_id, hospital_id=hospital_id).first()
     if row:
         td = dict(row.triage_detail or {})
         if body.assigned_nurse is not None:
@@ -1987,3 +2089,490 @@ def get_staff_list(_: dict = Depends(verify_token), db: Session = Depends(get_db
         if uname not in db_names:
             result.append({"username": uname, "name": u["name"], "role": u["role"]})
     return sorted(result, key=lambda x: (x["role"], x["name"]))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FEATURE SET 2: Vitals, Interpreter, Meds, Turnover, LWBS, Payer, Hospitals, FHIR
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── 1. REAL-TIME VITALS STREAM (SSE) ─────────────────────────────────────────
+
+_VITALS_STREAM_MAX_SECONDS = 600  # 10-minute cap to prevent indefinite connection hold
+
+
+@app.get("/vitals/{patient_id}/stream")
+async def vitals_stream(patient_id: str, token: dict = Depends(verify_query_token)):
+    """SSE: push live simulated vitals every 5 s for an admitted patient."""
+    import random, math
+
+    hospital_id = token.get("hospital_id", "default")
+    patient = next(
+        (p for p in er_queue
+         if p["patient_id"] == patient_id and p.get("hospital_id", "default") == hospital_id),
+        None,
+    )
+    if patient is None:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    sensor = patient.get("sensor_data", {})
+    hr_base = int(sensor.get("heart_rate", 80))
+    temp_base = float(sensor.get("skin_temp", 36.8))
+
+    async def _generate():
+        t = 0
+        deadline = asyncio.get_event_loop().time() + _VITALS_STREAM_MAX_SECONDS
+        while asyncio.get_event_loop().time() < deadline:
+            t += 1
+            hr = max(30, min(220, hr_base + random.randint(-6, 6) + int(3 * math.sin(t * 0.3))))
+            spo2 = max(88, min(100, 98 + random.randint(-3, 1)))
+            sys_bp = max(60, min(220, 120 + random.randint(-15, 20)))
+            dia_bp = max(40, min(140, 80 + random.randint(-10, 10)))
+            rr = max(8, min(40, 16 + random.randint(-3, 3)))
+            temp = round(temp_base + random.uniform(-0.2, 0.3), 1)
+            alert = hr > 120 or hr < 50 or spo2 < 94 or sys_bp > 180 or sys_bp < 80 or temp > 38.5
+            payload = {
+                "patient_id": patient_id,
+                "ts": datetime.utcnow().isoformat(),
+                "hr": hr, "spo2": spo2,
+                "bp": f"{sys_bp}/{dia_bp}", "sys": sys_bp, "dia": dia_bp,
+                "rr": rr, "temp": temp, "alert": alert,
+            }
+            yield f"data: {json.dumps(payload)}\n\n"
+            await asyncio.sleep(5)
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ── 2. INTERPRETER REQUEST ────────────────────────────────────────────────────
+
+class InterpreterBody(PydanticBase):
+    language: str = "Spanish"
+    notes: str | None = None
+
+
+@app.post("/queue/{patient_id}/interpreter")
+async def request_interpreter(
+    patient_id: str,
+    body: InterpreterBody,
+    token: dict = Depends(verify_token),
+    db: Session = Depends(get_db),
+):
+    hospital_id = token.get("hospital_id", "default")
+    found = False
+    patient_name = "Unknown"
+    for p in er_queue:
+        if p["patient_id"] == patient_id and p.get("hospital_id", "default") == hospital_id:
+            p["interpreter_needed"] = True
+            p["interpreter_language"] = body.language
+            p["interpreter_notes"] = body.notes
+            patient_name = p.get("name", "Unknown")
+            found = True
+            break
+    if not found:
+        raise HTTPException(status_code=404, detail="Patient not in queue")
+    asyncio.create_task(ws_manager.broadcast_staff("interpreter_request", {
+        "patient_id": patient_id, "language": body.language, "name": patient_name,
+    }))
+    write_audit(db, token["sub"], token["role"], "interpreter_request", patient_id=patient_id,
+                details={"language": body.language}, hospital_id=token.get("hospital_id", "default"))
+    return {"requested": True, "language": body.language, "patient_id": patient_id}
+
+
+@app.delete("/queue/{patient_id}/interpreter")
+async def cancel_interpreter(
+    patient_id: str,
+    token: dict = Depends(verify_token),
+    db: Session = Depends(get_db),
+):
+    hospital_id = token.get("hospital_id", "default")
+    for p in er_queue:
+        if p["patient_id"] == patient_id and p.get("hospital_id", "default") == hospital_id:
+            p["interpreter_needed"] = False
+            p.pop("interpreter_language", None)
+            p.pop("interpreter_notes", None)
+            break
+    write_audit(db, token["sub"], token["role"], "interpreter_cancel", patient_id=patient_id,
+                hospital_id=hospital_id)
+    return {"cancelled": True}
+
+
+# ── 3. MEDICATION RECONCILIATION ──────────────────────────────────────────────
+
+_DRUG_CLASSES: dict = {
+    "nsaid":         ["ibuprofen", "naproxen", "ketorolac", "aspirin", "indomethacin", "meloxicam"],
+    "anticoagulant": ["warfarin", "heparin", "enoxaparin", "apixaban", "rivaroxaban", "dabigatran"],
+    "penicillin":    ["amoxicillin", "ampicillin", "piperacillin", "nafcillin", "oxacillin"],
+    "sulfa":         ["sulfamethoxazole", "bactrim", "septra", "sulfadiazine"],
+    "ace_inhibitor": ["lisinopril", "enalapril", "captopril", "ramipril", "benazepril"],
+    "statin":        ["atorvastatin", "rosuvastatin", "simvastatin", "pravastatin"],
+    "opioid":        ["morphine", "oxycodone", "hydrocodone", "fentanyl", "tramadol", "codeine"],
+    "beta_blocker":  ["metoprolol", "atenolol", "carvedilol", "propranolol", "bisoprolol"],
+}
+
+_DX_CONCERNS: dict = {
+    "chest pain":      [("anticoagulant", "Monitor bleeding risk with anticoagulants in ACS workup")],
+    "gi bleed":        [("nsaid", "NSAIDs worsen GI bleeding"), ("anticoagulant", "Anticoagulants worsen GI bleeding")],
+    "kidney failure":  [("nsaid", "NSAIDs reduce renal perfusion"), ("ace_inhibitor", "ACEi risk in acute AKI")],
+    "asthma":          [("nsaid", "NSAIDs can trigger bronchospasm"), ("beta_blocker", "Beta-blockers contraindicated in asthma")],
+    "stroke":          [("anticoagulant", "Anticoagulants require careful dosing in stroke")],
+    "hypotension":     [("beta_blocker", "Beta-blockers worsen hypotension"), ("ace_inhibitor", "ACEi can worsen hypotension")],
+    "respiratory":     [("opioid", "Opioids cause respiratory depression")],
+}
+
+
+def _classify_med(med: str) -> list:
+    m = med.lower()
+    return [cls for cls, drugs in _DRUG_CLASSES.items() if any(d in m for d in drugs)]
+
+
+@app.get("/queue/{patient_id}/medications")
+def get_patient_medications(
+    patient_id: str,
+    token: dict = Depends(verify_token),
+    db: Session = Depends(get_db),
+):
+    hospital_id = token.get("hospital_id", "default")
+    patient = next(
+        (p for p in er_queue
+         if p["patient_id"] == patient_id and p.get("hospital_id", "default") == hospital_id),
+        None,
+    )
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not in queue")
+
+    ehr = patient.get("ehr_summary", {}) or {}
+    meds: list = ehr.get("current_medications", []) or []
+    allergies: list = ehr.get("allergies", []) or []
+    complaint = (patient.get("chief_complaint", "") or "").lower()
+    td = patient.get("triage_detail", {}) or {}
+    ddx = [d.lower() for d in (td.get("differential_diagnoses") or [])]
+
+    flags = []
+
+    # Allergy vs current med conflicts
+    for allergy in allergies:
+        al = allergy.lower()
+        for cls, drugs in _DRUG_CLASSES.items():
+            if any(d in al or al in d for d in drugs) or cls in al:
+                conflicts = [m for m in meds if any(d in m.lower() for d in drugs)]
+                if conflicts:
+                    flags.append({
+                        "severity": "critical",
+                        "type": "allergy_conflict",
+                        "message": f"⚠ ALLERGY to {allergy} — conflicts with active med: {', '.join(conflicts)}",
+                    })
+
+    # Dx/complaint vs med class
+    for dx_key, concerns in _DX_CONCERNS.items():
+        if dx_key in complaint or any(dx_key in d for d in ddx):
+            for cls, msg in concerns:
+                active = [m for m in meds if _classify_med(m) and cls in _classify_med(m)]
+                if active:
+                    flags.append({
+                        "severity": "warning",
+                        "type": "dx_drug_concern",
+                        "message": f"{msg} — patient on: {', '.join(active)}",
+                    })
+
+    # Annotate each med with its class
+    annotated = []
+    for med in meds:
+        classes = _classify_med(med)
+        annotated.append({"name": med, "classes": classes})
+
+    return {
+        "patient_id": patient_id,
+        "medications": annotated,
+        "allergies": allergies,
+        "flags": flags,
+        "critical_count": sum(1 for f in flags if f["severity"] == "critical"),
+        "warning_count": sum(1 for f in flags if f["severity"] == "warning"),
+    }
+
+
+# ── 4. BED TURNOVER STATS ─────────────────────────────────────────────────────
+
+@app.get("/beds/turnover")
+def get_bed_turnover(token: dict = Depends(verify_token), db: Session = Depends(get_db)):
+    now = datetime.utcnow()
+    beds = get_beds(db, hospital_id=token.get("hospital_id", "default"))
+    units: dict = defaultdict(lambda: {"cleaning_now": [], "total_cycles": 0})
+
+    for bed in beds:
+        if bed["status"] == "cleaning":
+            start = _bed_cleaning_start.get(bed["room"])
+            elapsed = round((now - start).total_seconds() / 60, 1) if start else None
+            units[bed["unit"]]["cleaning_now"].append({"room": bed["room"], "elapsed_min": elapsed})
+
+    result = []
+    for unit, stats in units.items():
+        cleaning = stats["cleaning_now"]
+        result.append({
+            "unit": unit,
+            "currently_cleaning": len(cleaning),
+            "beds": cleaning,
+            "longest_min": max((b["elapsed_min"] or 0 for b in cleaning), default=0),
+        })
+    return result
+
+
+# ── 5. LWBS (LEFT WITHOUT BEING SEEN) ────────────────────────────────────────
+
+@app.post("/queue/{patient_id}/lwbs")
+async def mark_lwbs(
+    patient_id: str,
+    token: dict = Depends(require_role("admin", "nurse", "physician")),
+    db: Session = Depends(get_db),
+):
+    hospital_id = token.get("hospital_id", "default")
+    patient = next(
+        (p for p in er_queue
+         if p["patient_id"] == patient_id and p.get("hospital_id", "default") == hospital_id),
+        None,
+    )
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not in queue")
+
+    from database import LWBSRecord
+    wait_min = patient.get("wait_minutes_actual") or patient.get("wait_time_estimate")
+    record = LWBSRecord(
+        hospital_id=hospital_id,
+        patient_id=patient_id,
+        name=patient.get("name"),
+        age=patient.get("age"),
+        phone=patient.get("phone"),
+        chief_complaint=patient.get("chief_complaint"),
+        esi_level=patient.get("esi_level"),
+        wait_min=wait_min,
+    )
+    db.add(record)
+    er_queue[:] = [p for p in er_queue if p["patient_id"] != patient_id]
+    discharge_patient_db(db, patient_id)
+    db.commit()
+    write_audit(db, token["sub"], token["role"], "lwbs", patient_id=patient_id,
+                hospital_id=hospital_id)
+    asyncio.create_task(ws_manager.broadcast_staff("patient_discharged", {"patient_id": patient_id}))
+    return {"lwbs": True, "record_id": record.id}
+
+
+@app.get("/lwbs")
+def get_lwbs_records(token: dict = Depends(verify_token), db: Session = Depends(get_db)):
+    from database import LWBSRecord
+    hospital_id = token.get("hospital_id", "default")
+    records = (db.query(LWBSRecord)
+               .filter_by(hospital_id=hospital_id)
+               .order_by(LWBSRecord.left_at.desc())
+               .limit(100).all())
+    return [
+        {
+            "id": r.id, "patient_id": r.patient_id, "name": r.name, "age": r.age,
+            "phone": r.phone, "chief_complaint": r.chief_complaint, "esi_level": r.esi_level,
+            "wait_min": r.wait_min, "left_at": r.left_at.isoformat(),
+            "sms_sent": r.sms_sent, "followup_booked": r.followup_booked,
+        }
+        for r in records
+    ]
+
+
+@app.post("/lwbs/{record_id}/sms")
+async def send_lwbs_sms(
+    record_id: str,
+    token: dict = Depends(require_role("admin", "nurse", "physician")),
+    db: Session = Depends(get_db),
+):
+    from database import LWBSRecord
+    hospital_id = token.get("hospital_id", "default")
+    record = db.query(LWBSRecord).filter_by(id=record_id, hospital_id=hospital_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Record not found")
+    if not record.phone:
+        raise HTTPException(status_code=422, detail="No phone on file for this patient")
+
+    first = (record.name or "").split()[0] if record.name else "there"
+    msg = (f"Hi {first}, we noticed you left our ED before being seen — we're sorry for the wait. "
+           f"Please call us or visit our CareNavigator at "
+           f"{_os.getenv('FRONTEND_URL', 'https://mediscan-gateway.vercel.app')}/check "
+           f"to book a follow-up. Your health matters to us.")
+
+    twilio_sid = _os.getenv("TWILIO_ACCOUNT_SID")
+    twilio_auth = _os.getenv("TWILIO_AUTH_TOKEN")
+    twilio_from = _os.getenv("TWILIO_FROM")
+    sent = False
+    if twilio_sid and twilio_auth and twilio_from:
+        try:
+            from twilio.rest import Client
+            Client(twilio_sid, twilio_auth).messages.create(body=msg, from_=twilio_from, to=record.phone)
+            sent = True
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"SMS failed: {e}")
+    else:
+        sent = True  # simulated in dev
+
+    record.sms_sent = sent
+    record.sms_sent_at = datetime.utcnow()
+    db.commit()
+    return {"sent": sent, "simulated": not bool(twilio_sid)}
+
+
+# ── 6. PAYER MIX ANALYTICS ────────────────────────────────────────────────────
+
+@app.get("/analytics/payer-mix")
+def get_payer_mix(token: dict = Depends(verify_token), db: Session = Depends(get_db)):
+    hospital_id = token.get("hospital_id", "default")
+    patients = db.query(PatientRecord).filter_by(hospital_id=hospital_id).all()
+    total = len(patients)
+
+    from collections import Counter
+    providers = Counter()
+    plans = Counter()
+    copays = []
+    eligible = 0
+
+    for p in patients:
+        ins = p.insurance or {}
+        if ins.get("provider"):
+            providers[ins["provider"]] += 1
+        if ins.get("plan_type"):
+            plans[ins["plan_type"]] += 1
+        if ins.get("copay") is not None:
+            copays.append(float(ins["copay"]))
+        if ins.get("eligible"):
+            eligible += 1
+
+    return {
+        "total_patients": total,
+        "by_provider": [{"name": k, "count": v, "pct": round(v / total * 100, 1) if total else 0}
+                        for k, v in providers.most_common(10)],
+        "by_plan": [{"name": k, "count": v, "pct": round(v / total * 100, 1) if total else 0}
+                    for k, v in plans.most_common()],
+        "avg_copay": round(sum(copays) / len(copays), 2) if copays else 0,
+        "eligible_pct": round(eligible / total * 100, 1) if total else 0,
+        "uninsured_pct": round((total - eligible) / total * 100, 1) if total else 0,
+    }
+
+
+# ── 7. MULTI-HOSPITAL SWITCHER ────────────────────────────────────────────────
+
+@app.get("/hospitals/available")
+def list_available_hospitals(token: dict = Depends(verify_token), db: Session = Depends(get_db)):
+    """Return active hospitals for the hospital-switcher UI (all authenticated roles)."""
+    rows = db.query(Hospital).filter_by(active=True).all()
+    current = token.get("hospital_id", "default")
+    return [
+        {"id": h.id, "slug": h.slug, "name": h.name,
+         "city": h.city, "state": h.state, "current": h.id == current}
+        for h in rows
+    ]
+
+
+@app.post("/auth/switch-hospital")
+def switch_hospital(
+    slug: str = Query(...),
+    token: dict = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+):
+    hospital = db.query(Hospital).filter_by(slug=slug, active=True).first()
+    if not hospital:
+        raise HTTPException(status_code=404, detail="Hospital not found")
+    new_token = create_token(
+        token["sub"], token.get("role", "admin"),
+        mfa_verified=token.get("mfa", False),
+        hospital_id=hospital.id,
+    )
+    return {"access_token": new_token, "hospital": {"slug": hospital.slug, "name": hospital.name, "id": hospital.id}}
+
+
+# ── 8. EHR FHIR WEBHOOK ───────────────────────────────────────────────────────
+
+_FHIR_MAX_ENTRIES = 500
+
+
+@app.post("/fhir/webhook")
+async def fhir_webhook(request: Request, db: Session = Depends(get_db)):
+    """Receive FHIR R4 Bundle events from Epic / Cerner. Validated via shared secret header."""
+    secret = request.headers.get("X-FHIR-Secret", "")
+    expected = _os.getenv("FHIR_WEBHOOK_SECRET", "")
+    if not expected:
+        raise HTTPException(status_code=503, detail="FHIR webhook not configured — set FHIR_WEBHOOK_SECRET")
+    if secret != expected:
+        raise HTTPException(status_code=401, detail="Invalid FHIR webhook secret")
+
+    # Require hospital scoping via header so events only affect the correct tenant
+    hospital_id = request.headers.get("X-Hospital-ID", "")
+    if not hospital_id:
+        raise HTTPException(status_code=400, detail="X-Hospital-ID header required")
+
+    try:
+        bundle = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    if bundle.get("resourceType") != "Bundle":
+        return {"accepted": False, "reason": "Expected FHIR Bundle"}
+
+    entries = bundle.get("entry", [])
+    if len(entries) > _FHIR_MAX_ENTRIES:
+        raise HTTPException(status_code=413, detail=f"Bundle exceeds {_FHIR_MAX_ENTRIES} entries")
+
+    processed = []
+    for entry in entries:
+        resource = entry.get("resource", {})
+        rtype = resource.get("resourceType")
+
+        if rtype == "Patient":
+            pid = resource.get("id", "")
+            name_obj = (resource.get("name") or [{}])[0]
+            for p in er_queue:
+                if p.get("patient_id") == pid and p.get("hospital_id", "default") == hospital_id:
+                    if resource.get("birthDate"):
+                        from datetime import date
+                        bd = date.fromisoformat(resource["birthDate"])
+                        p["age"] = (date.today() - bd).days // 365
+                    processed.append(f"Patient/{pid} demographics updated")
+                    break
+
+        elif rtype == "Observation":
+            subject = (resource.get("subject") or {}).get("reference", "").replace("Patient/", "")
+            loinc = (resource.get("code") or {}).get("coding", [{}])[0].get("code", "")
+            value = (resource.get("valueQuantity") or {}).get("value")
+            loinc_map = {"8867-4": "heart_rate", "59408-5": "spo2", "8310-5": "skin_temp",
+                         "8480-6": "sys_bp", "8462-4": "dia_bp", "9279-1": "respiratory_rate"}
+            field = loinc_map.get(loinc)
+            if subject and field and value is not None:
+                for p in er_queue:
+                    if p.get("patient_id") == subject and p.get("hospital_id", "default") == hospital_id:
+                        p.setdefault("sensor_data", {})[field] = value
+                        processed.append(f"Observation {loinc}({field})={value}")
+                        break
+
+        elif rtype == "Condition":
+            subject = (resource.get("subject") or {}).get("reference", "").replace("Patient/", "")
+            ctext = (resource.get("code") or {}).get("text", "")
+            if subject and ctext:
+                for p in er_queue:
+                    if p.get("patient_id") == subject and p.get("hospital_id", "default") == hospital_id:
+                        flags = p.setdefault("risk_flags", [])
+                        if ctext not in flags:
+                            flags.append(ctext)
+                        processed.append(f"Condition added: {ctext}")
+                        break
+
+        elif rtype == "MedicationRequest":
+            subject = (resource.get("subject") or {}).get("reference", "").replace("Patient/", "")
+            med_name = ((resource.get("medicationCodeableConcept") or {}).get("text") or
+                        (resource.get("medicationCodeableConcept") or {}).get("coding", [{}])[0].get("display", ""))
+            if subject and med_name:
+                for p in er_queue:
+                    if p.get("patient_id") == subject and p.get("hospital_id", "default") == hospital_id:
+                        ehr = p.setdefault("ehr_summary", {})
+                        meds = ehr.setdefault("current_medications", [])
+                        if med_name not in meds:
+                            meds.append(med_name)
+                        processed.append(f"Medication added: {med_name}")
+                        break
+
+    return {"accepted": True, "bundle_type": bundle.get("type"), "processed": len(processed), "details": processed}
