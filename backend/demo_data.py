@@ -2,7 +2,6 @@
 Pre-baked demo patients for the public kiosk/investor demo stream.
 No real patient data — fully synthetic, no AI calls needed.
 """
-import random
 import uuid
 
 DEMO_PATIENTS = [

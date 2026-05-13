@@ -9,8 +9,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Callable
 from sqlalchemy.orm import Session
-from database import ClinicalJourney, SessionLocal
-from symptom_check import run_assessment
+from database import ClinicalJourney
 
 _JOURNEY_SCHEDULE_HOURS = {
     1: [24, 48],         # ESI 1 — critical, 2 follow-ups

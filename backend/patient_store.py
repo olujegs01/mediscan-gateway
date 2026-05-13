@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import List, Optional
 from sqlalchemy.orm import Session
 
-from database import PatientRecord, AuditLog, ShiftReport, SessionLocal
+from database import PatientRecord, AuditLog, ShiftReport
 
 
 # ── Patient helpers ────────────────────────────────────────────────────────────

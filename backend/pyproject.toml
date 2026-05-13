@@ -1,4 +1,4 @@
 [tool.ruff]
 line-length = 88
 target-version = "py311"
-extend-ignore = ["E203", "W503"]
+extend-ignore = ["E203"]

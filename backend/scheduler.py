@@ -6,7 +6,6 @@ env vars to go live against a real scheduling system.
 import os
 import uuid
 from datetime import datetime, timedelta
-from typing import Optional
 from sqlalchemy.orm import Session
 from database import AppointmentSlot
 
