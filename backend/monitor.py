@@ -5,7 +5,7 @@ Re-evaluates queue patients every INTERVAL seconds, pushes alerts via WebSocket.
 import asyncio
 import os
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 import anthropic
 
 MONITOR_INTERVAL = int(os.getenv("MONITOR_INTERVAL_SECONDS", "120"))  # 2 min demo, 15 min prod
@@ -110,20 +110,39 @@ async def _fast_deterioration_check(patient: dict) -> dict | None:
     try:
         td = patient.get("triage_detail", {})
         sensors = patient.get("sensor_data", {})
-        prompt = f"""Patient re-assessment (ESI 3, waiting >45 min):
-Name: {patient.get('name')}, Age: {patient.get('age')}
-Chief complaint: {patient.get('chief_complaint')}
-Original vitals: HR {sensors.get('heart_rate','?')} bpm, RR {sensors.get('respiratory_rate','?')}, Temp {sensors.get('skin_temp','?')}°C
-Original risk flags: {patient.get('risk_flags', [])}
-Sepsis probability: {td.get('sepsis_probability', 'low')}
 
-Should this patient be escalated? Reply JSON only:
-{{"escalate": true/false, "reason": "one line", "suggested_esi": 2 or 3}}"""
+        static_instructions = (
+            "You are a clinical decision-support AI assisting emergency department staff. "
+            "When given a patient re-assessment for an ESI 3 patient who has been waiting over "
+            "45 minutes, evaluate whether their condition warrants escalation based on the "
+            "provided vitals, chief complaint, and risk flags. "
+            "Reply with JSON only in this exact format: "
+            '{"escalate": true/false, "reason": "one line", "suggested_esi": 2 or 3}'
+        )
+
+        prompt = (
+            f"Patient re-assessment (ESI 3, waiting >45 min):\n"
+            f"Name: {patient.get('name')}, Age: {patient.get('age')}\n"
+            f"Chief complaint: {patient.get('chief_complaint')}\n"
+            f"Original vitals: HR {sensors.get('heart_rate', '?')} bpm, "
+            f"RR {sensors.get('respiratory_rate', '?')}, "
+            f"Temp {sensors.get('skin_temp', '?')}°C\n"
+            f"Original risk flags: {patient.get('risk_flags', [])}\n"
+            f"Sepsis probability: {td.get('sepsis_probability', 'low')}\n\n"
+            f"Should this patient be escalated?"
+        )
 
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(None, lambda: _anthropic.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=100,
+            system=[
+                {
+                    "type": "text",
+                    "text": static_instructions,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             messages=[{"role": "user", "content": prompt}],
         ))
         text = next((b.text for b in response.content if hasattr(b, "text")), "{}")

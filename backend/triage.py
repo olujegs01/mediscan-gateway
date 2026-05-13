@@ -18,7 +18,7 @@ Clinical frameworks embedded (based on current ED research):
 import os
 import json
 import anthropic
-from models import SensorReadings, EHRRecord, ClinicalScores
+from models import SensorReadings, EHRRecord
 
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
@@ -157,6 +157,20 @@ RESPOND WITH VALID JSON ONLY — NO MARKDOWN
             model="claude-sonnet-4-6",
             max_tokens=2000,
             thinking={"type": "enabled", "budget_tokens": 1200},
+            system=[
+                {
+                    "type": "text",
+                    "text": (
+                        "You are MediScan's clinical AI engine — an expert emergency medicine physician "
+                        "AI trained in ESI v4 triage scoring, qSOFA, SIRS, HEART score, Cincinnati Stroke "
+                        "Scale, sepsis bundle protocols, and behavioral health fast-routing. "
+                        "You analyze patient sensor data, EHR records, and chief complaints to produce a "
+                        "precise JSON triage assessment following the Emergency Severity Index (ESI) v4 "
+                        "protocol. Always output valid JSON only — no markdown, no prose."
+                    ),
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             messages=[{"role": "user", "content": prompt}],
         )
 
