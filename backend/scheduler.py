@@ -6,7 +6,6 @@ env vars to go live against a real scheduling system.
 import os
 import uuid
 from datetime import datetime, timedelta
-from typing import Optional
 from sqlalchemy.orm import Session
 from database import AppointmentSlot
 
@@ -101,7 +100,7 @@ def get_available_slots(db: Session, care_type: str, limit: int = 8) -> list:
         db.query(AppointmentSlot)
         .filter(
             AppointmentSlot.provider_type == care_type,
-            AppointmentSlot.available == True,
+            AppointmentSlot.available.is_(True),
             AppointmentSlot.slot_date >= today,
         )
         .order_by(AppointmentSlot.slot_date, AppointmentSlot.slot_time)

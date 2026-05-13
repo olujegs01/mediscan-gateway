@@ -42,9 +42,9 @@ def handle_inbound_sms(db: Session, from_phone: str, body: str) -> str:
     if journey_result is not None:
         if journey_result.get("escalated"):
             reply = (
-                f"MediScan: Thank you for letting us know. Your symptoms sound serious — "
-                f"please call 911 or go to the nearest ER immediately. "
-                f"Your care team has been notified."
+                "MediScan: Thank you for letting us know. Your symptoms sound serious — "
+                "please call 911 or go to the nearest ER immediately. "
+                "Your care team has been notified."
             )
         else:
             reply = (

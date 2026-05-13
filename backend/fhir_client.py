@@ -8,6 +8,8 @@ Set env vars to enable real Epic sandbox:
 
 Without these, every call falls through to the simulated biometric.py data.
 """
+from __future__ import annotations
+
 import os
 import time
 import httpx
@@ -185,6 +187,87 @@ def _parse_patient(res: dict) -> dict:
         "blood_type": blood_type,
         "phone": phone,
     }
+
+
+def get_allergies(fhir_patient_id: str) -> list[str]:
+    """Pull active allergy names for a patient."""
+    token = _get_token()
+    if not token or not fhir_patient_id:
+        return []
+    try:
+        r = httpx.get(
+            f"{_FHIR_BASE}/AllergyIntolerance",
+            params={"patient": fhir_patient_id, "clinical-status": "active", "_count": "20"},
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/fhir+json"},
+            timeout=8,
+        )
+        r.raise_for_status()
+        bundle = r.json()
+        allergies = []
+        for entry in bundle.get("entry", []):
+            res = entry["resource"]
+            code = res.get("code", {})
+            text = code.get("text") or (code.get("coding", [{}])[0].get("display", ""))
+            if text:
+                allergies.append(text)
+        return allergies
+    except Exception as e:
+        print(f"[FHIR] Allergies error: {e}")
+        return []
+
+
+def get_observations(fhir_patient_id: str) -> dict:
+    """Pull recent vital-sign observations for a patient.
+
+    Returns a dict mapping display name -> value+unit string, e.g.
+    {"Heart rate": "72 /min", "Systolic blood pressure": "120 mmHg"}
+    """
+    LOINC_LABELS = {
+        "8867-4": "Heart rate",
+        "8480-6": "Systolic blood pressure",
+        "8462-4": "Diastolic blood pressure",
+        "8310-5": "Body temperature",
+        "59408-5": "Oxygen saturation",
+    }
+    token = _get_token()
+    if not token or not fhir_patient_id:
+        return {}
+    try:
+        r = httpx.get(
+            f"{_FHIR_BASE}/Observation",
+            params={
+                "patient": fhir_patient_id,
+                "category": "vital-signs",
+                "_count": "10",
+                "_sort": "-date",
+            },
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/fhir+json"},
+            timeout=8,
+        )
+        r.raise_for_status()
+        bundle = r.json()
+        vitals: dict = {}
+        for entry in bundle.get("entry", []):
+            res = entry["resource"]
+            codings = res.get("code", {}).get("coding", [])
+            loinc_code = next(
+                (c["code"] for c in codings if c.get("system", "").startswith("http://loinc.org")),
+                None,
+            )
+            if loinc_code not in LOINC_LABELS:
+                continue
+            label = LOINC_LABELS[loinc_code]
+            if label in vitals:
+                continue  # keep the most recent (first in -date sorted list)
+            vq = res.get("valueQuantity", {})
+            value = vq.get("value")
+            unit = vq.get("unit", "")
+            if value is not None:
+                vitals[label] = f"{value} {unit}".strip()
+        return vitals
+    except Exception as e:
+        print(f"[FHIR] Observations error: {e}")
+        return {}
 
 
 def fhir_available() -> bool:

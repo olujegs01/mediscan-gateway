@@ -18,7 +18,7 @@ Clinical frameworks embedded (based on current ED research):
 import os
 import json
 import anthropic
-from models import SensorReadings, EHRRecord, ClinicalScores
+from models import SensorReadings, EHRRecord
 
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
@@ -157,8 +157,29 @@ RESPOND WITH VALID JSON ONLY — NO MARKDOWN
             model="claude-sonnet-4-6",
             max_tokens=2000,
             thinking={"type": "enabled", "budget_tokens": 1200},
+            system=[
+                {
+                    "type": "text",
+                    "text": (
+                        "You are MediScan's clinical AI engine — an expert emergency medicine physician "
+                        "AI trained in ESI v4 triage scoring, qSOFA, SIRS, HEART score, Cincinnati Stroke "
+                        "Scale, sepsis bundle protocols, and behavioral health fast-routing. "
+                        "You analyze patient sensor data, EHR records, and chief complaints to produce a "
+                        "precise JSON triage assessment following the Emergency Severity Index (ESI) v4 "
+                        "protocol. Always output valid JSON only — no markdown, no prose."
+                    ),
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             messages=[{"role": "user", "content": prompt}],
         )
+
+        # Extract extended thinking for reasoning chain
+        thinking_text = ""
+        for block in response.content:
+            if hasattr(block, "type") and block.type == "thinking":
+                thinking_text = getattr(block, "thinking", "")
+                break
 
         text_block = next(
             (b.text for b in response.content if hasattr(b, "text")), None
@@ -188,6 +209,46 @@ RESPOND WITH VALID JSON ONLY — NO MARKDOWN
         result.setdefault("differential_diagnoses", [])
         result.setdefault("time_sensitive_interventions", [])
         result.setdefault("disposition_prediction", "discharge")
+        result.setdefault("reasoning_chain", [])
+        result.setdefault("thinking_available", False)
+
+        # Distill thinking into 3–5 key reasoning bullets
+        if thinking_text:
+            import re
+            reasoning_lines = []
+            text = thinking_text
+
+            # Look for ESI rationale
+            esi_match = re.search(
+                r'ESI\s*[12345].*?(?:because|due to|based on)[^.]{0,120}\.',
+                text, re.IGNORECASE,
+            )
+            if esi_match:
+                reasoning_lines.append(esi_match.group(0).strip())
+
+            # Look for sepsis reasoning
+            if "sepsis" in text.lower():
+                sepsis_match = re.search(
+                    r'(?:sepsis|qSOFA|SIRS)[^.]{0,150}\.', text, re.IGNORECASE,
+                )
+                if sepsis_match:
+                    reasoning_lines.append(sepsis_match.group(0).strip())
+
+            # Look for time-sensitive reasoning
+            time_match = re.search(
+                r'(?:immediately|urgent|time.sensitive|within \d+)[^.]{0,120}\.',
+                text, re.IGNORECASE,
+            )
+            if time_match:
+                reasoning_lines.append(time_match.group(0).strip())
+
+            # Fallback: take first 3 sentences of thinking
+            if not reasoning_lines:
+                sentences = re.split(r'(?<=[.!?])\s+', thinking_text.strip())
+                reasoning_lines = [s.strip() for s in sentences[:3] if len(s.strip()) > 20]
+
+            result["reasoning_chain"] = reasoning_lines[:5]
+            result["thinking_available"] = True
 
         return result
 
@@ -210,9 +271,12 @@ def _fallback_triage(age: int, complaint: str, sensors: SensorReadings) -> dict:
 
     # SIRS
     sirs = 0
-    if sensors.skin_temp > 38.0 or sensors.skin_temp < 36.0: sirs += 1
-    if sensors.heart_rate > 90: sirs += 1
-    if sensors.respiratory_rate > 20: sirs += 1
+    if sensors.skin_temp > 38.0 or sensors.skin_temp < 36.0:
+        sirs += 1
+    if sensors.heart_rate > 90:
+        sirs += 1
+    if sensors.respiratory_rate > 20:
+        sirs += 1
 
     # Behavioral health
     bh_flag = any(k in c for k in ["suicidal", "mental health", "psychiatric", "anxiety", "panic", "crisis", "overdose"])
