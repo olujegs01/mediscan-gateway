@@ -156,8 +156,8 @@ def send_shift_report_email(report: dict, recipients: list[str] = None) -> bool:
       </div>
       <div style="padding:32px;">
         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:28px;">
-          {"".join(f'<div style="background:#0a1520;border:1px solid #1e293b;border-radius:10px;padding:14px;text-align:center;"><div style="font-size:26px;font-weight:700;color:{c};">{v}</div><div style="font-size:12px;color:#64748b;margin-top:4px;">{l}</div></div>'
-            for v, l, c in [
+          {"".join(f'<div style="background:#0a1520;border:1px solid #1e293b;border-radius:10px;padding:14px;text-align:center;"><div style="font-size:26px;font-weight:700;color:{c};">{v}</div><div style="font-size:12px;color:#64748b;margin-top:4px;">{label}</div></div>'
+            for v, label, c in [
               (total, "Patients", "#0d9488"),
               (f"{avg_wait} min", "Avg Wait", "#0284c7"),
               (sepsis, "Sepsis Alerts", "#dc2626" if sepsis > 0 else "#94a3b8"),

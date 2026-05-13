@@ -884,7 +884,7 @@ async def twilio_sms_webhook(request: Request, db: Session = Depends(get_db)):
     if twilio_auth:
         try:
             from twilio.request_validator import RequestValidator
-            body = await request.body()
+            await request.body()
             form_raw = await request.form()
             params = dict(form_raw)
             url = str(request.url)
@@ -2736,7 +2736,6 @@ async def fhir_webhook(request: Request, db: Session = Depends(get_db)):
 
         if rtype == "Patient":
             pid = resource.get("id", "")
-            name_obj = (resource.get("name") or [{}])[0]
             for p in er_queue:
                 if p.get("patient_id") == pid and p.get("hospital_id", "default") == hospital_id:
                     if resource.get("birthDate"):
