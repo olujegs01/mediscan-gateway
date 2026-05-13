@@ -10,7 +10,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
 import jwt as pyjwt
 
-from models import PatientScanRequest
 from hardware_sensors import run_full_scan
 from biometric import identify_patient, pull_ehr, verify_insurance
 from triage import run_ai_triage
@@ -18,7 +17,7 @@ from notifications import generate_wristband, send_phone_push, send_family_alert
 from alerts import notify_physician
 from auth import (
     LoginRequest, TokenResponse, verify_token, require_role, login,
-    SECRET_KEY, ALGORITHM, setup_mfa, enable_mfa, disable_mfa, create_token, _get_user,
+    SECRET_KEY, ALGORITHM, setup_mfa, enable_mfa, disable_mfa, create_token,
 )
 from database import init_db, get_db, StaffUser, PatientFeedback, PatientNote
 from database import PatientRecord
@@ -33,7 +32,7 @@ from pdf_report import generate_shift_pdf
 from demo_data import get_demo_patient
 from websocket_manager import manager as ws_manager
 from monitor import monitoring_loop
-from fhir_client import search_patient, get_conditions, get_medications, fhir_available
+from fhir_client import search_patient, get_conditions, get_medications, get_allergies, get_observations, fhir_available
 from sqlalchemy.orm import Session
 from pydantic import BaseModel as PydanticBase
 from symptom_check import run_assessment, CARE_LEVELS
@@ -45,12 +44,12 @@ from clinical_journeys import (
 )
 from sms_triage import handle_inbound_sms
 from compliance import (
-    get_compliance_status, get_escalation_rules, toggle_rule, update_rule,
+    get_compliance_status, get_escalation_rules, update_rule,
     seed_escalation_rules, generate_baa_pdf,
 )
 from demo_seeder import seed_demo_data
 from database import DemoRequest, ClinicalJourney as ClinicalJourneyModel, Hospital, Subscription, SOAPNote
-from email_service import notify_demo_request, notify_journey_escalation, send_shift_report_email
+from email_service import notify_demo_request, send_shift_report_email
 
 app = FastAPI(title="MediScan Gateway API", version="2.0")
 
@@ -1247,6 +1246,7 @@ async def scan_stream(
         ehr = pull_ehr(patient_id, name, age)
 
         # Enrich with Epic FHIR if available
+        fhir_vitals: dict = {}
         if fhir_available():
             try:
                 fhir_pt = search_patient(biometric.name or name)
@@ -1254,17 +1254,25 @@ async def scan_stream(
                     fid = fhir_pt["fhir_id"]
                     fhir_conditions = get_conditions(fid)
                     fhir_meds = get_medications(fid)
+                    fhir_allergies = get_allergies(fid)
+                    fhir_vitals = get_observations(fid)
                     if fhir_conditions:
                         ehr.history = list(set(ehr.history + fhir_conditions))
                     if fhir_meds:
                         ehr.current_medications = list(set(ehr.current_medications + fhir_meds))
+                    if fhir_allergies:
+                        ehr.allergies = list(set(getattr(ehr, 'allergies', []) + fhir_allergies))
             except Exception as fe:
                 print(f"FHIR enrich error: {fe}")
 
+        fhir_label = {"epic": "Epic FHIR R4", "sandbox": "FHIR R4 Sandbox (HAPI)"}.get(fhir_mode(), "Simulated EHR")
+        ehr_data = ehr.dict()
+        ehr_data["fhir_source"] = fhir_mode()
+        ehr_data["fhir_vitals"] = fhir_vitals if fhir_available() else {}
         yield sse("zone2_ehr", {
             "zone": 2,
-            "message": f"EHR pulled from {'Epic FHIR R4' if fhir_available() else 'Epic/Cerner (simulated)'}",
-            "data": ehr.dict(),
+            "message": f"EHR pulled — {fhir_label}",
+            "data": ehr_data,
         })
         await asyncio.sleep(0.3)
 
@@ -1468,7 +1476,6 @@ def email_report(
     token: dict = Depends(require_role("admin", "nurse", "physician")),
     db: Session = Depends(get_db),
 ):
-    import random
     now = datetime.utcnow()
     start_dt = now.replace(hour=7, minute=0, second=0)
 
@@ -1745,7 +1752,6 @@ def satisfaction_stats(
     token: dict = Depends(require_role("admin", "nurse", "physician")),
     db: Session = Depends(get_db),
 ):
-    from sqlalchemy import func
     hospital_id = token.get("hospital_id", "default")
     rows = db.query(PatientFeedback).filter_by(hospital_id=hospital_id).all()
     if not rows:
@@ -1823,6 +1829,210 @@ def demo_seed_queue(_: dict = Depends(require_role("admin")), db: Session = Depe
         if not any(q["patient_id"] == p["patient_id"] for q in er_queue):
             er_queue.append(p)
     return {"seeded": True, "queue_size": len(er_queue)}
+
+
+# ── Training Simulation ────────────────────────────────────────────────────────
+
+TRAINING_SCENARIOS = [
+    {
+        "id": "T001",
+        "name": "Robert Chen, 67M",
+        "chief_complaint": "Crushing chest pain radiating to left arm, diaphoresis, onset 45 min ago",
+        "vitals": {"hr": 112, "sbp": 88, "dbp": 55, "rr": 22, "temp": 37.1, "o2_sat": 94},
+        "history": ["Hypertension", "Type 2 Diabetes", "Prior MI 3 years ago"],
+        "medications": ["Metformin", "Lisinopril", "Aspirin 81mg"],
+        "presentation_note": "Patient is pale, diaphoretic, clutching chest. Wife states onset was sudden during breakfast.",
+        "correct_esi": 1,
+        "correct_reasoning": "Immediate life threat: STEMI presentation with hemodynamic instability (SBP 88). Requires immediate intervention — cath lab activation, IV access, heparin.",
+        "teaching_points": ["Hypotension + chest pain = immediate ESI 1", "Prior MI increases risk of STEMI vs NSTEMI", "Time is muscle — door-to-balloon <90 min target"],
+        "difficulty": "medium"
+    },
+    {
+        "id": "T002",
+        "name": "Maya Patel, 28F",
+        "chief_complaint": "Right ankle pain after twisting during soccer game",
+        "vitals": {"hr": 78, "sbp": 118, "dbp": 72, "rr": 16, "temp": 36.8, "o2_sat": 99},
+        "history": [],
+        "medications": [],
+        "presentation_note": "Patient walking with slight limp, no obvious deformity. Pain 5/10. States she heard a 'pop' but can bear weight.",
+        "correct_esi": 4,
+        "correct_reasoning": "Stable vitals, one resource needed (X-ray), no immediate threat. Ottawa Ankle Rules may rule out fracture.",
+        "teaching_points": ["Can bear weight = lower acuity", "Ottawa Ankle Rules: malleolar tenderness + can't bear weight → X-ray", "ESI 4 = stable, 1 resource expected"],
+        "difficulty": "easy"
+    },
+    {
+        "id": "T003",
+        "name": "William Torres, 72M",
+        "chief_complaint": "Sudden onset severe headache — 'worst headache of my life'",
+        "vitals": {"hr": 94, "sbp": 178, "dbp": 102, "rr": 18, "temp": 37.2, "o2_sat": 97},
+        "history": ["Hypertension"],
+        "medications": ["Amlodipine"],
+        "presentation_note": "Patient holding head, grimacing. States headache reached maximum intensity within seconds. No prior similar episodes. Mild neck stiffness on exam.",
+        "correct_esi": 1,
+        "correct_reasoning": "Thunderclap headache + neck stiffness = subarachnoid hemorrhage until proven otherwise. Requires immediate CT non-contrast + LP if CT negative.",
+        "teaching_points": ["'Worst headache of life' + thunderclap onset = SAH red flag", "Neck stiffness suggests meningeal irritation", "Never give analgesics before CT in thunderclap headache"],
+        "difficulty": "medium"
+    },
+    {
+        "id": "T004",
+        "name": "Keisha Johnson, 8F",
+        "chief_complaint": "Fever, ear pain, crying — onset 2 days",
+        "vitals": {"hr": 110, "sbp": 98, "dbp": 62, "rr": 22, "temp": 38.9, "o2_sat": 98},
+        "history": [],
+        "medications": [],
+        "presentation_note": "Child is fussy but consolable. Pulling at right ear. No rash. No stiff neck. Parents gave ibuprofen 2 hours ago with partial relief.",
+        "correct_esi": 4,
+        "correct_reasoning": "Stable child, likely otitis media. Responds to antipyretics. No high-risk features. ESI 4 = 1 resource (ear exam + possible culture).",
+        "teaching_points": ["Consolable child with known-source fever = ESI 4", "Pediatric normal HR is higher — 110 expected with fever in 8yo", "Ibuprofen response is reassuring"],
+        "difficulty": "easy"
+    },
+    {
+        "id": "T005",
+        "name": "Ahmed Al-Rashid, 55M",
+        "chief_complaint": "Confusion, fever, difficulty speaking since this morning",
+        "vitals": {"hr": 128, "sbp": 82, "dbp": 48, "rr": 26, "temp": 39.8, "o2_sat": 91},
+        "history": ["Diabetes", "Chronic kidney disease"],
+        "medications": ["Insulin glargine", "Furosemide"],
+        "presentation_note": "Patient is alert but confused. Cannot state the year. Skin is warm, mottled. Wife states he was well yesterday. No focal neuro deficits.",
+        "correct_esi": 1,
+        "correct_reasoning": "Septic shock: fever + tachycardia + hypotension + altered mentation + low O2 sat = SIRS + organ dysfunction. Hour-1 Sepsis Bundle required immediately.",
+        "teaching_points": ["qSOFA ≥2 (confusion + RR>22 + SBP<100) = high sepsis risk", "Mottling = microcirculatory failure", "Hour-1 Bundle: cultures, lactate, fluids, antibiotics, vasopressors"],
+        "difficulty": "hard"
+    },
+    {
+        "id": "T006",
+        "name": "Tyler Brooks, 23M",
+        "chief_complaint": "Suicidal ideation, has a plan, ingested unknown pills 1 hour ago",
+        "vitals": {"hr": 102, "sbp": 122, "dbp": 78, "rr": 18, "temp": 37.0, "o2_sat": 98},
+        "history": ["Depression", "Prior suicide attempt 6 months ago"],
+        "medications": ["Sertraline"],
+        "presentation_note": "Patient is calm, cooperative, and states he took 'a lot' of his sertraline. Denies alcohol. GCS 15. Security escort in place.",
+        "correct_esi": 2,
+        "correct_reasoning": "High-risk behavioral health: active suicidal ideation + plan + prior attempt + possible ingestion = ESI 2. Needs cardiac monitoring (serotonin syndrome/QTc), toxicology, psychiatric eval.",
+        "teaching_points": ["Prior attempt is single strongest predictor of future attempt", "Sertraline overdose: serotonin syndrome risk", "ESI 2 for high-risk behavioral health even if vitals stable"],
+        "difficulty": "medium"
+    },
+    {
+        "id": "T007",
+        "name": "Priya Sharma, 45F",
+        "chief_complaint": "Sudden facial droop, left arm weakness, slurred speech — 45 minutes ago",
+        "vitals": {"hr": 88, "sbp": 162, "dbp": 94, "rr": 16, "temp": 36.9, "o2_sat": 97},
+        "history": ["Atrial fibrillation", "Hypertension"],
+        "medications": ["Warfarin", "Metoprolol"],
+        "presentation_note": "FAST exam positive: facial droop right, arm drift left, slurred speech. Last known well was 45 minutes ago. On anticoagulation.",
+        "correct_esi": 1,
+        "correct_reasoning": "Acute ischemic stroke in tPA window (≤3h). FAST positive, afib = high cardioembolic risk. Immediate CT, INR check, neurology activation. tPA contraindicated if INR >1.7.",
+        "teaching_points": ["Stroke = brain attack, time is neurons", "tPA window 0-3h (4.5h with criteria)", "Warfarin on board = immediate INR + hemorrhagic stroke consideration"],
+        "difficulty": "medium"
+    },
+    {
+        "id": "T008",
+        "name": "Sandra Kowalski, 38F",
+        "chief_complaint": "Shortness of breath at rest, oxygen saturation dropping",
+        "vitals": {"hr": 118, "sbp": 142, "dbp": 88, "rr": 32, "temp": 37.4, "o2_sat": 84},
+        "history": ["Asthma", "Recent long-haul flight 3 days ago"],
+        "medications": ["Albuterol inhaler"],
+        "presentation_note": "Patient is anxious, using accessory muscles, cannot complete sentences. Decreased air movement bilateral bases. No wheeze. Albuterol used 6 times today without relief.",
+        "correct_esi": 1,
+        "correct_reasoning": "O2 sat 84% = immediate life threat. Recent immobility (long-haul flight) + acute dyspnea = PE must be excluded. Silent chest in asthmatic = impending respiratory failure.",
+        "teaching_points": ["O2 sat <90% = ESI 1 automatic", "Silent chest = no airflow = worse than wheeze", "Wells PE criteria: recent immobility + tachycardia + no other explanation"],
+        "difficulty": "hard"
+    },
+    {
+        "id": "T009",
+        "name": "Marcus Webb, 16M",
+        "chief_complaint": "Nausea, vomiting, abdominal pain — 8 hours, pain migrating to right lower quadrant",
+        "vitals": {"hr": 98, "sbp": 114, "dbp": 70, "rr": 18, "temp": 38.1, "o2_sat": 98},
+        "history": [],
+        "medications": [],
+        "presentation_note": "Pain started periumbilical, now RLQ. Rebound tenderness on exam. Anorexia since yesterday. Rovsing sign positive.",
+        "correct_esi": 2,
+        "correct_reasoning": "Classic appendicitis presentation: migratory pain to RLQ + rebound + fever + anorexia + positive Rovsing sign. Risk of perforation — surgical consult required urgently.",
+        "teaching_points": ["Rebound tenderness = peritoneal irritation = surgical emergency", "Rovsing sign: LLQ palpation causes RLQ pain", "Pediatric appendicitis: higher perforation rate — act quickly"],
+        "difficulty": "medium"
+    },
+    {
+        "id": "T010",
+        "name": "Eleanor Voss, 80F",
+        "chief_complaint": "Found on floor, unable to get up, hip pain",
+        "vitals": {"hr": 92, "sbp": 104, "dbp": 66, "rr": 20, "temp": 36.5, "o2_sat": 95},
+        "history": ["Osteoporosis", "Atrial fibrillation", "Dementia"],
+        "medications": ["Apixaban", "Donepezil", "Calcium/Vit D"],
+        "presentation_note": "Patient is confused (baseline per family). Right leg shortened and externally rotated. Cannot bear weight. Family states she was on the floor for approximately 6 hours.",
+        "correct_esi": 2,
+        "correct_reasoning": "Hip fracture with prolonged lie time = ESI 2. On anticoagulation (apixaban) — reversal may be needed pre-op. 6h on floor = rhabdomyolysis risk, pressure injury, hypothermia risk.",
+        "teaching_points": ["Shortened/externally rotated leg = hip fracture", "Anticoagulation + surgical fracture = urgent reversal discussion", "Prolonged lie >4h: check CK, BMP, core temp"],
+        "difficulty": "hard"
+    },
+]
+
+
+@app.get("/training/scenarios")
+async def get_training_scenarios():
+    """Return all training scenarios (without the correct_esi to avoid spoiling)."""
+    return [
+        {
+            "id": s["id"],
+            "name": s["name"],
+            "chief_complaint": s["chief_complaint"],
+            "vitals": s["vitals"],
+            "history": s["history"],
+            "medications": s["medications"],
+            "presentation_note": s["presentation_note"],
+            "difficulty": s["difficulty"],
+        }
+        for s in TRAINING_SCENARIOS
+    ]
+
+
+class TrainingAnswerBody(PydanticBase):
+    scenario_id: str
+    selected_esi: int  # 1-5
+    response_time_seconds: float  # how long they took
+
+
+@app.post("/training/submit")
+async def submit_training_answer(
+    body: TrainingAnswerBody,
+    user: dict = Depends(verify_token),
+):
+    scenario = next((s for s in TRAINING_SCENARIOS if s["id"] == body.scenario_id), None)
+    if not scenario:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+
+    correct = scenario["correct_esi"]
+    is_correct = body.selected_esi == correct
+
+    # Score: 100 for correct, partial credit for ±1, speed bonus
+    if is_correct:
+        base_score = 100
+    elif abs(body.selected_esi - correct) == 1:
+        base_score = 50  # adjacent ESI = partial credit
+    else:
+        base_score = 0
+
+    # Speed bonus: max 20 points, decreases linearly over 120s
+    speed_bonus = max(0, int(20 * (1 - min(body.response_time_seconds, 120) / 120)))
+    total_score = base_score + (speed_bonus if is_correct else 0)
+
+    return {
+        "correct": is_correct,
+        "correct_esi": correct,
+        "your_esi": body.selected_esi,
+        "score": total_score,
+        "speed_bonus": speed_bonus if is_correct else 0,
+        "reasoning": scenario["correct_reasoning"],
+        "teaching_points": scenario["teaching_points"],
+        "esi_label": {1: "CRITICAL", 2: "HIGH ACUITY", 3: "URGENT", 4: "LESS URGENT", 5: "NON-URGENT"}[correct],
+    }
+
+
+@app.get("/training/scenarios/{scenario_id}/reveal")
+async def reveal_scenario(scenario_id: str, _: dict = Depends(verify_token)):
+    scenario = next((s for s in TRAINING_SCENARIOS if s["id"] == scenario_id), None)
+    if not scenario:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    return scenario
 
 
 # ── Feature 1 & 2: Charge Nurse Dashboard ─────────────────────────────────────
@@ -2103,7 +2313,8 @@ _VITALS_STREAM_MAX_SECONDS = 600  # 10-minute cap to prevent indefinite connecti
 @app.get("/vitals/{patient_id}/stream")
 async def vitals_stream(patient_id: str, token: dict = Depends(verify_query_token)):
     """SSE: push live simulated vitals every 5 s for an admitted patient."""
-    import random, math
+    import random
+    import math
 
     hospital_id = token.get("hospital_id", "default")
     patient = next(
@@ -2299,7 +2510,7 @@ def get_patient_medications(
 @app.get("/beds/turnover")
 def get_bed_turnover(token: dict = Depends(verify_token), db: Session = Depends(get_db)):
     now = datetime.utcnow()
-    beds = get_beds(db, hospital_id=token.get("hospital_id", "default"))
+    beds = get_beds(db)
     units: dict = defaultdict(lambda: {"cleaning_now": [], "total_cycles": 0})
 
     for bed in beds:

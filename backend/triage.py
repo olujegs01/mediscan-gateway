@@ -174,6 +174,13 @@ RESPOND WITH VALID JSON ONLY — NO MARKDOWN
             messages=[{"role": "user", "content": prompt}],
         )
 
+        # Extract extended thinking for reasoning chain
+        thinking_text = ""
+        for block in response.content:
+            if hasattr(block, "type") and block.type == "thinking":
+                thinking_text = getattr(block, "thinking", "")
+                break
+
         text_block = next(
             (b.text for b in response.content if hasattr(b, "text")), None
         )
@@ -202,6 +209,46 @@ RESPOND WITH VALID JSON ONLY — NO MARKDOWN
         result.setdefault("differential_diagnoses", [])
         result.setdefault("time_sensitive_interventions", [])
         result.setdefault("disposition_prediction", "discharge")
+        result.setdefault("reasoning_chain", [])
+        result.setdefault("thinking_available", False)
+
+        # Distill thinking into 3–5 key reasoning bullets
+        if thinking_text:
+            import re
+            reasoning_lines = []
+            text = thinking_text
+
+            # Look for ESI rationale
+            esi_match = re.search(
+                r'ESI\s*[12345].*?(?:because|due to|based on)[^.]{0,120}\.',
+                text, re.IGNORECASE,
+            )
+            if esi_match:
+                reasoning_lines.append(esi_match.group(0).strip())
+
+            # Look for sepsis reasoning
+            if "sepsis" in text.lower():
+                sepsis_match = re.search(
+                    r'(?:sepsis|qSOFA|SIRS)[^.]{0,150}\.', text, re.IGNORECASE,
+                )
+                if sepsis_match:
+                    reasoning_lines.append(sepsis_match.group(0).strip())
+
+            # Look for time-sensitive reasoning
+            time_match = re.search(
+                r'(?:immediately|urgent|time.sensitive|within \d+)[^.]{0,120}\.',
+                text, re.IGNORECASE,
+            )
+            if time_match:
+                reasoning_lines.append(time_match.group(0).strip())
+
+            # Fallback: take first 3 sentences of thinking
+            if not reasoning_lines:
+                sentences = re.split(r'(?<=[.!?])\s+', thinking_text.strip())
+                reasoning_lines = [s.strip() for s in sentences[:3] if len(s.strip()) > 20]
+
+            result["reasoning_chain"] = reasoning_lines[:5]
+            result["thinking_available"] = True
 
         return result
 
