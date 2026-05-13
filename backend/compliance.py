@@ -6,6 +6,31 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from database import EscalationRule
 
+
+def _field_encryption_status() -> tuple[str, str]:
+    """
+    Return (status, note) for the field-level encryption HIPAA control.
+
+    Field-level AES-256 encryption of PHI columns (e.g. name, chief_complaint)
+    is NOT yet implemented in the data models. To enable it, set the
+    FIELD_ENCRYPTION_KEY environment variable and implement column-level
+    encryption in models.py using a library such as sqlalchemy-utils
+    EncryptedType or cryptography.fernet.
+
+    This function honestly reports whether the key has been configured so the
+    compliance dashboard is not misleading.
+    """
+    if os.getenv("FIELD_ENCRYPTION_KEY"):
+        return (
+            "pass",
+            "FIELD_ENCRYPTION_KEY is set — implement column encryption in models.py to activate",
+        )
+    return (
+        "not_configured",
+        "Field-level encryption not configured — set FIELD_ENCRYPTION_KEY env var and implement "
+        "column encryption in models.py",
+    )
+
 DEFAULT_RULES = [
     {
         "rule_name": "ESI 1 — Immediate Physician Notification",
@@ -57,25 +82,33 @@ DEFAULT_RULES = [
     },
 ]
 
-HIPAA_CONTROLS = [
-    {"control": "Data encrypted at rest (AES-256)",                "status": "pass",        "note": "SQLite/PostgreSQL with encrypted storage"},
-    {"control": "TLS 1.3 for all data in transit",                 "status": "pass",        "note": "Enforced by Render/Vercel HTTPS"},
-    {"control": "HIPAA audit log — all PHI access events",         "status": "pass",        "note": "AuditLog table records every access"},
-    {"control": "Role-based access control (RBAC)",                "status": "pass",        "note": "admin / nurse / physician roles enforced"},
-    {"control": "TOTP multi-factor authentication",                "status": "pass",        "note": "pyotp TOTP with 30s windows"},
-    {"control": "Automatic session timeout (12h JWT expiry)",      "status": "pass",        "note": "TOKEN_EXPIRE_HOURS=12 in auth.py"},
-    {"control": "PHI stripped from public/lobby endpoints",        "status": "pass",        "note": "Lobby and demo endpoints return no PHI"},
-    {"control": "Data retention policy documented (7 years)",      "status": "pass",        "note": "45 CFR 164.530(j) compliant"},
-    {"control": "Security headers (HSTS, X-Frame, CSP)",           "status": "pass",        "note": "Added via FastAPI middleware"},
-    {"control": "Brute-force login protection (rate limiting)",    "status": "pass",        "note": "15-min lockout after 10 failed attempts"},
-    {"control": "Input validation on all endpoints",               "status": "pass",        "note": "Pydantic models + FastAPI validation"},
-    {"control": "Business Associate Agreement (BAA)",              "status": "available",   "note": "One-click PDF generation available"},
-    {"control": "Breach notification procedure",                   "status": "documented",  "note": "60-day notification per 45 CFR §164.410"},
-    {"control": "Employee HIPAA training program",                 "status": "in_progress", "note": "Scheduled for Q2 2026"},
-    {"control": "Annual penetration testing",                      "status": "scheduled",   "note": "Scheduled Q3 2026 with external vendor"},
-    {"control": "SOC 2 Type II audit",                             "status": "in_progress", "note": "Readiness assessment underway"},
-    {"control": "Disaster recovery / BCP plan",                    "status": "in_progress", "note": "DR runbook in progress"},
-]
+def _build_hipaa_controls() -> list:
+    """Build the HIPAA controls list with a live check for field-level encryption status."""
+    enc_status, enc_note = _field_encryption_status()
+    return [
+        {"control": "Field-level PHI encryption (AES-256)",            "status": enc_status,    "note": enc_note},
+        {"control": "TLS 1.3 for all data in transit",                 "status": "pass",        "note": "Enforced by Render/Vercel HTTPS"},
+        {"control": "HIPAA audit log — all PHI access events",         "status": "pass",        "note": "AuditLog table records every access"},
+        {"control": "Role-based access control (RBAC)",                "status": "pass",        "note": "admin / nurse / physician roles enforced"},
+        {"control": "TOTP multi-factor authentication",                "status": "pass",        "note": "pyotp TOTP with 30s windows"},
+        {"control": "Automatic session timeout (12h JWT expiry)",      "status": "pass",        "note": "TOKEN_EXPIRE_HOURS=12 in auth.py"},
+        {"control": "PHI stripped from public/lobby endpoints",        "status": "pass",        "note": "Lobby and demo endpoints return no PHI"},
+        {"control": "Data retention policy documented (7 years)",      "status": "pass",        "note": "45 CFR 164.530(j) compliant"},
+        {"control": "Security headers (HSTS, X-Frame, CSP)",           "status": "pass",        "note": "Added via FastAPI middleware"},
+        {"control": "Brute-force login protection (rate limiting)",    "status": "pass",        "note": "15-min lockout after 10 failed attempts"},
+        {"control": "Input validation on all endpoints",               "status": "pass",        "note": "Pydantic models + FastAPI validation"},
+        {"control": "Business Associate Agreement (BAA)",              "status": "available",   "note": "One-click PDF generation available"},
+        {"control": "Breach notification procedure",                   "status": "documented",  "note": "60-day notification per 45 CFR §164.410"},
+        {"control": "Employee HIPAA training program",                 "status": "in_progress", "note": "Scheduled for Q2 2026"},
+        {"control": "Annual penetration testing",                      "status": "scheduled",   "note": "Scheduled Q3 2026 with external vendor"},
+        {"control": "SOC 2 Type II audit",                             "status": "in_progress", "note": "Readiness assessment underway"},
+        {"control": "Disaster recovery / BCP plan",                    "status": "in_progress", "note": "DR runbook in progress"},
+    ]
+
+
+# Module-level constant — built once at import time using current env vars.
+# Re-call _build_hipaa_controls() at request time if you need per-request env evaluation.
+HIPAA_CONTROLS = _build_hipaa_controls()
 
 DATA_RETENTION_POLICY = {
     "patient_records_years": 7,
@@ -124,12 +157,14 @@ def update_rule(db: Session, rule_id: str, patch: dict) -> dict | None:
 
 
 def get_compliance_status() -> dict:
-    pass_count = sum(1 for c in HIPAA_CONTROLS if c["status"] == "pass")
+    # Rebuild controls at request time so FIELD_ENCRYPTION_KEY changes take effect without restart.
+    controls = _build_hipaa_controls()
+    pass_count = sum(1 for c in controls if c["status"] == "pass")
     return {
-        "hipaa_controls": HIPAA_CONTROLS,
+        "hipaa_controls": controls,
         "controls_passing": pass_count,
-        "controls_total": len(HIPAA_CONTROLS),
-        "compliance_score_pct": round(pass_count / len(HIPAA_CONTROLS) * 100),
+        "controls_total": len(controls),
+        "compliance_score_pct": round(pass_count / len(controls) * 100),
         "data_retention": DATA_RETENTION_POLICY,
         "soc2_status": "in_progress",
         "soc2_expected": "Q3 2026",
