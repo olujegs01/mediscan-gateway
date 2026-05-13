@@ -62,7 +62,6 @@ def generate_shift_pdf(report: dict) -> bytes:
         esi_breakdown = report.get("esi_breakdown", {})
         if esi_breakdown:
             story.append(Paragraph("ESI Distribution", styles["Heading2"]))
-            esi_colors_map = {1: "#ef4444", 2: "#f97316", 3: "#eab308", 4: "#22c55e", 5: "#6b7280"}
             esi_labels = {1: "Critical", 2: "High Acuity", 3: "Urgent", 4: "Less Urgent", 5: "Non-Urgent"}
             rows = [["ESI Level", "Label", "Count"]]
             for level in range(1, 6):
@@ -101,12 +100,6 @@ def generate_shift_pdf(report: dict) -> bytes:
 
 def _minimal_pdf(report: dict) -> bytes:
     """Fallback: returns a bare-minimum valid PDF when ReportLab is absent."""
-    content = (
-        f"MediScan Shift Report\n"
-        f"Generated: {datetime.utcnow().isoformat()}\n"
-        f"Total patients: {report.get('total_patients', 0)}\n"
-        f"Avg wait: {report.get('avg_wait_minutes', 0):.0f} min\n"
-    ).encode()
     # Minimal valid PDF 1.4 structure
     pdf = (
         b"%PDF-1.4\n"

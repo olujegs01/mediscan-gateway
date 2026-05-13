@@ -87,7 +87,7 @@ class TestClinicalJourneysSMS:
         from clinical_journeys import trigger_journey, process_sms_response
         trigger_journey(mem_db, "PT-SMS-COMPLETE", "Frank", "+13125550400", esi_level=5)
         # ESI 5 has only 1 check-in; after 1 response it should complete
-        result = process_sms_response(mem_db, "+13125550400", "feeling fine")
+        process_sms_response(mem_db, "+13125550400", "feeling fine")
         journey = mem_db.query(ClinicalJourney).filter_by(patient_id="PT-SMS-COMPLETE").first()
         assert journey is not None
         assert journey.journey_status in ("completed", "active")

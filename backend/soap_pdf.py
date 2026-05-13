@@ -10,7 +10,7 @@ try:
     from reportlab.lib.units import inch
     from reportlab.lib import colors
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable, Table, TableStyle
-    from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
+    from reportlab.lib.enums import TA_LEFT  # noqa: F401
     REPORTLAB_OK = True
 except ImportError:
     REPORTLAB_OK = False

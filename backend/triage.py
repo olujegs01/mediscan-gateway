@@ -271,9 +271,12 @@ def _fallback_triage(age: int, complaint: str, sensors: SensorReadings) -> dict:
 
     # SIRS
     sirs = 0
-    if sensors.skin_temp > 38.0 or sensors.skin_temp < 36.0: sirs += 1
-    if sensors.heart_rate > 90: sirs += 1
-    if sensors.respiratory_rate > 20: sirs += 1
+    if sensors.skin_temp > 38.0 or sensors.skin_temp < 36.0:
+        sirs += 1
+    if sensors.heart_rate > 90:
+        sirs += 1
+    if sensors.respiratory_rate > 20:
+        sirs += 1
 
     # Behavioral health
     bh_flag = any(k in c for k in ["suicidal", "mental health", "psychiatric", "anxiety", "panic", "crisis", "overdose"])

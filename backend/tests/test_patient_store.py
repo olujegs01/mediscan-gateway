@@ -181,7 +181,7 @@ def test_get_audit_logs(db):
     write_audit(db, "nurse", "nurse", "view_queue", hospital_id="default")
     logs = get_audit_logs(db, limit=50, hospital_id="default")
     assert isinstance(logs, list)
-    actions = [l["action"] for l in logs]
+    actions = [log["action"] for log in logs]
     assert "view_queue" in actions
 
 

@@ -8,6 +8,8 @@ Set env vars to enable real Epic sandbox:
 
 Without these, every call falls through to the simulated biometric.py data.
 """
+from __future__ import annotations
+
 import os
 import time
 import httpx
